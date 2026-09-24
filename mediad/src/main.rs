@@ -129,6 +129,15 @@ struct Args {
     #[arg(long)]
     no_auto_exposure: bool,
 
+    /// Capture the sensor's full 3280x2464 array and crop 16:9 in the ISP, instead of pinning
+    /// 1920x1080.
+    ///
+    /// For a kernel whose 1080p mode is a native centre crop (~39°) rather than a scaled full-frame
+    /// readout (~62°) — the RK3576 vendor kernel's IMX219 driver is one. Caps the stream at
+    /// `pipeline::FULL_FRAME_FPS`, whatever `[media] quality` asks for.
+    #[arg(long)]
+    full_frame: bool,
+
     /// Take frames from a duck in MuJoCo at `host:port` instead of a camera.
     ///
     /// The geometry has to match the simulator's camera — set `[media] quality` (the rung `mediad`
@@ -260,6 +269,22 @@ fn main() -> ExitCode {
         )
     } else {
         media.geometry()
+    };
+    // The full array cannot run faster than it does, and `v4l2src` refuses caps above that rather
+    // than slowing to it. Only for the camera: a test pattern ignores the sensor entirely.
+    let fps = if args.full_frame
+        && args.sim_camera.is_none()
+        && matches!(media.source, robotd_params::MediaSource::Camera)
+        && fps > mediad::pipeline::FULL_FRAME_FPS
+    {
+        tracing::warn!(
+            asked = fps,
+            running = mediad::pipeline::FULL_FRAME_FPS,
+            "--full-frame: the full sensor array caps the frame rate"
+        );
+        mediad::pipeline::FULL_FRAME_FPS
+    } else {
+        fps
     };
     tracing::info!(
         source = media.source.label(),
@@ -403,6 +428,7 @@ fn main() -> ExitCode {
                         device: args.camera_device.clone(),
                         exposure: args.exposure,
                         analogue_gain: args.analogue_gain,
+                        full_frame: args.full_frame,
                     })
                 }
                 robotd_params::MediaSource::Test => mediad::pipeline::Source::Test,

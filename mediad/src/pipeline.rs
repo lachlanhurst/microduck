@@ -228,7 +228,17 @@ pub struct Camera {
     pub device: String,
     pub exposure: u32,
     pub analogue_gain: u32,
+    /// Pin the full 3280x2464 array and crop 16:9 in the ISP, instead of the 1920x1080 mode.
+    /// `--full-frame`; [`pin_full_frame`] says which boards want it.
+    pub full_frame: bool,
 }
+
+/// The frame rate the full 3280x2464 array runs at, and so the ceiling of `--full-frame`.
+///
+/// `v4l2src` refuses caps above what the mode delivers rather than dropping to it, so a 30 fps rung
+/// with the full array is `not-negotiated` at startup, not a slower stream. Measured 21.2-21.4 fps
+/// on the RK3576 (2026-09-24).
+pub const FULL_FRAME_FPS: u32 = 21;
 
 /// One raw frame off the tee, as the last one seen.
 #[derive(Debug, Clone)]
@@ -1308,7 +1318,11 @@ fn make(name: &str) -> Result<gst::Element> {
 /// layout, and the frame loss has a cause with a small fix — see [`raise_capture_buffers`].
 #[cfg(target_os = "linux")]
 fn camera_source(camera: &Camera, fps: u32) -> Result<gst::Element> {
-    pin_sensor_mode(fps)?;
+    if camera.full_frame {
+        pin_full_frame(&camera.device)?;
+    } else {
+        pin_sensor_mode(fps)?;
+    }
 
     // Exposure and gain go through `extra-controls` rather than a `v4l2-ctl` call, so they are
     // applied by whoever opens the device — including after a re-open we did not initiate.
@@ -1613,6 +1627,67 @@ fn pin_sensor_mode(fps: u32) -> Result<()> {
         let _ = SENSOR_MODE.set(Some(crate::camera::SensorMode::PINNED));
         tracing::info!(%media, %entity, target_fps = fps, "sensor mode 1920x1080");
     }
+    Ok(())
+}
+
+/// The whole 3280x2464 array, with the ISP cropping a centred 16:9 band before it scales.
+///
+/// **For a kernel whose 1920x1080 mode is a native crop.** On the RK3576 vendor kernel (Armbian
+/// `rk-6.1-rkr5.1`) the IMX219 driver's 1080p register table reads the centre 58.5% of the array
+/// — a ~39° field, not the ~62° [`pin_sensor_mode`]'s mode gives on the Zero 3W. The full array
+/// and a crop in the ISP recovers the whole width for no CPU: crop, debayer and scale all happen
+/// in the ISP. The cost is [`FULL_FRAME_FPS`] rather than 30.
+///
+/// The crop is a V4L2 selection on the capture node, set before `v4l2src` opens it; it survives
+/// the format set `v4l2src` makes. Without it the ISP squashes 4:3 into 16:9 anamorphically, which
+/// is a picture that looks nearly right and a geometry that is not — so a failure here is fatal
+/// rather than a warning, unlike the sensor mode's.
+///
+/// A board running Rockchip's 3A engine must run it in this same sensor mode: the engine reads the
+/// sensor format once, when it starts.
+#[cfg(target_os = "linux")]
+fn pin_full_frame(device: &str) -> Result<()> {
+    const ARRAY: (u32, u32) = (3280, 2464);
+    let crop = crate::camera::SensorMode::FULL_FRAME_16_9;
+    // Centred, and on an even row: the Bayer pattern repeats every two, and an odd top swaps the
+    // colour channels of the whole frame.
+    let top = (ARRAY.1 - crop.height).div_ceil(2) & !1;
+
+    let (media, entity) = find_sensor()?;
+    let format = format!("\"{entity}\":0[fmt:SRGGB10_1X10/{}x{}]", ARRAY.0, ARRAY.1);
+    let output = std::process::Command::new("media-ctl")
+        .args(["-d", &media, "--set-v4l2", &format])
+        .output()
+        .context("could not run media-ctl; it comes from v4l-utils")?;
+    if !output.status.success() {
+        let _ = SENSOR_MODE.set(None);
+        bail!(
+            "media-ctl would not set the {}x{} sensor mode on {entity}: {}",
+            ARRAY.0,
+            ARRAY.1,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let selection = format!(
+        "target=crop,left=0,top={top},width={},height={}",
+        crop.width, crop.height
+    );
+    let output = std::process::Command::new("v4l2-ctl")
+        .args(["-d", device, &format!("--set-selection={selection}")])
+        .output()
+        .context("could not run v4l2-ctl; it comes from v4l-utils")?;
+    if !output.status.success() {
+        let _ = SENSOR_MODE.set(None);
+        bail!(
+            "v4l2-ctl would not set the 16:9 crop on {device} ({selection}): {}. Is {device} the \
+             ISP main path? rkcif's nodes take no crop",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let _ = SENSOR_MODE.set(Some(crate::camera::SensorMode::FULL_FRAME_16_9));
+    tracing::info!(%media, %entity, %device, %selection, "sensor mode 3280x2464, ISP crop to 16:9");
     Ok(())
 }
 

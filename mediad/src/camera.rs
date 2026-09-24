@@ -87,6 +87,18 @@ impl SensorMode {
         width: 1920,
         height: 1080,
     };
+
+    /// What `pipeline::pin_full_frame` gives instead, for `--full-frame`: the whole 3280×2464 array
+    /// with the ISP cropping a centred 16:9 band out of it before it scales.
+    ///
+    /// For a kernel whose 1920×1080 is a *native crop* rather than the scaled readout the table
+    /// above describes — the RK3576 vendor driver's is the centre 58.5% of the array, about 39°.
+    /// The crop keeps the full ~62° width at 16:9, which is the framing the nominal geometry and the
+    /// family calibration assume, at the full array's 21 fps.
+    pub const FULL_FRAME_16_9: Self = Self {
+        width: 3280,
+        height: 1845,
+    };
 }
 
 /// Where the optical axis is and how long the focal length is, in pixels of a delivered frame.
@@ -325,6 +337,28 @@ mod tests {
         assert!((at_1080p.fx - nominal_focal_px(1920)).abs() < 0.01);
         let hfov = 2.0 * (960.0 / at_1080p.fx).atan().to_degrees();
         assert!((hfov - 62.0).abs() < 0.01, "{hfov}");
+    }
+
+    /// `--full-frame`'s 16:9 crop of the full array is a uniform scale of 1280x720, so it gets the
+    /// same geometry as the pinned mode — which is the point of cropping in the ISP rather than
+    /// letting it squash 4:3 into 16:9.
+    #[test]
+    fn the_full_frame_crop_has_the_pinned_modes_geometry() {
+        let full =
+            Intrinsics::nominal(Some(SensorMode::FULL_FRAME_16_9), 1280, 720).expect("known");
+        let pinned = Intrinsics::nominal(Some(SensorMode::PINNED), 1280, 720).expect("known");
+        assert_eq!(
+            (full.fx, full.cx, full.cy),
+            (pinned.fx, pinned.cx, pinned.cy)
+        );
+        assert!(Intrinsics::family(Some(SensorMode::FULL_FRAME_16_9), 1280, 720).is_some());
+
+        // Uncropped, the array is 4:3, and a 16:9 frame from it was squashed — nothing to publish.
+        let array = SensorMode {
+            width: 3280,
+            height: 2464,
+        };
+        assert!(Intrinsics::nominal(Some(array), 1280, 720).is_none());
     }
 
     /// The twin's 45° vertical FOV over a 640x360 render — a wider (~72.7°) horizontal field than the
