@@ -109,3 +109,9 @@ url = "2"
 # `strip = true` in particular removes the symbol table, turning a panic backtrace in
 # journald into bare addresses, which is exactly what you need when diagnosing a robot
 # you cannot attach a debugger to. `lto`/`codegen-units` only lengthened builds.
+
+# Dukki: the head BMI088 is a generic breakout that can only strap accel 0x18 with gyro 0x68, and
+# v0.1.2 hard-codes the HAT's 0x19/0x68. The `configurable-addresses` branch of a sibling checkout
+# adds `Bmi088::detect` and `with_addresses`. Drop this once that is merged and tagged upstream.
+[patch."https://github.com/pollen-robotics/bmi088-rs"]
+bmi088 = { path = "../bmi088-rs" }

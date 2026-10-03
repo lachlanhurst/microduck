@@ -1,7 +1,8 @@
 //! The head IMU (BMI088 on the HAT), read by `tofd` because `tofd` owns this I²C bus.
 //!
 //! The BMI088 sits on the same bus as the ToF (accel `0x19`, gyro `0x68` per the HAT schematic —
-//! next to the ToF's `0x29` and the audio codec's `0x18`, no collision). The bus is accessed one
+//! next to the ToF's `0x29` and the audio codec's `0x18`, no collision). A breakout strapped to
+//! `0x18`/`0x68` is found too: `open_imu` reads the chip IDs before it writes anything. The bus is accessed one
 //! transaction at a time (each carries its slave address), so a second `i2cdev` handle for the IMU
 //! coexists with the ToF driver's handle; the kernel serialises transactions at the adapter.
 //!
@@ -235,16 +236,32 @@ fn open_imu(bus: Option<&Path>) -> anyhow::Result<Bmi088Ahrs<I2cdev>> {
             last = Some(anyhow::anyhow!("{} does not exist", bus.display()));
             continue;
         }
-        let i2c = match I2cdev::new(bus) {
+        let mut i2c = match I2cdev::new(bus) {
             Ok(i2c) => i2c,
             Err(e) => {
                 last = Some(anyhow::anyhow!("open {}: {e}", bus.display()));
                 continue;
             }
         };
-        match Bmi088::new(i2c, Config::default()) {
+        // Found by chip ID rather than assumed: the HAT straps 0x19 and 0x68, and a breakout
+        // whose SDO1 and SDO2 share one pin can only give 0x18 with 0x68 (or 0x19 with 0x69).
+        // The HAT's pair is tried first and detection only reads, so the codec at 0x18 on a
+        // HAT is never written to.
+        let addr = match Bmi088::detect(&mut i2c) {
+            Ok(addr) => addr,
+            Err(e) => {
+                last = Some(anyhow::anyhow!("no BMI088 on {}: {e:?}", bus.display()));
+                continue;
+            }
+        };
+        match Bmi088::with_addresses(i2c, Config::default(), addr) {
             Ok(imu) => {
-                tracing::info!(bus = %bus.display(), "BMI088 answered");
+                tracing::info!(
+                    bus = %bus.display(),
+                    acc = format_args!("{:#04x}", addr.acc),
+                    gyro = format_args!("{:#04x}", addr.gyro),
+                    "BMI088 answered"
+                );
                 return Ok(Bmi088Ahrs::new(imu, BETA));
             }
             Err(e) => last = Some(anyhow::anyhow!("BMI088 init on {}: {e:?}", bus.display())),
