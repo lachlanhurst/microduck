@@ -1,19 +1,19 @@
-# The eye LED daemon. Dukki's addition; not part of Pollen's robot.
+# The expression daemon: the eye LED. Dukki's addition; not part of Pollen's robot.
 #
 # Nothing depends on this unit and it depends on nothing: with no robotd the eye shows "asleep"
 # and keeps retrying, and with no LED fitted the daemon fails to open the spidev node and
 # systemd retries it every 5 s, quietly.
 [Unit]
-Description=Robot eye LED daemon
+Description=Robot expression daemon (eye LED)
 After=local-fs.target
 
 [Service]
 Type=exec
-ExecStart=/opt/robot/daemon/current/bin/eyed
-User=eyed
-Group=eyed
-# robot — /dev/spidev-eye is root:robot 0660 (setup-eye.sh's udev rule), robotd's socket is the
-#         robot group's, and the eye socket is handed to it
+ExecStart=/opt/robot/daemon/current/bin/expressd
+User=expressd
+Group=expressd
+# robot — /dev/spidev-eye is root:robot 0660 (setup-express.sh's udev rule), robotd's socket is the
+#         robot group's, and the express socket is handed to it
 SupplementaryGroups=robot
 Restart=always
 RestartSec=5s
@@ -38,7 +38,7 @@ CapabilityBoundingSet=
 Environment=RUST_LOG=info
 StandardOutput=journal
 StandardError=journal
-RuntimeDirectory=eyed
+RuntimeDirectory=expressd
 
 [Install]
 WantedBy=multi-user.target

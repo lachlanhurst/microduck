@@ -14,10 +14,10 @@
 //!
 //! | Layer | Set by | For |
 //! |---|---|---|
-//! | `privacy` | a client (`eye.set`) | the camera is being watched. Nothing below can hide it |
+//! | `privacy` | a client (`express.set`) | the camera is being watched. Nothing below can hide it |
 //! | `fault` | robotd's state | fallen |
-//! | `identify` | a client (`eye.identify`) | "this one is mine" |
-//! | `mood` | a client (`eye.set`) | whatever a behaviour layer wants to say |
+//! | `identify` | a client (`express.identify`) | "this one is mine" |
+//! | `mood` | a client (`express.set`) | whatever a behaviour layer wants to say |
 //! | `ambient` | robotd's state | asleep, limp, holding, standing, walking |
 //!
 //! `fault` and `ambient` are derived, never set: a client that could paint over "fallen" or
@@ -182,7 +182,7 @@ impl Stack {
         None
     }
 
-    /// Every layer that is set, highest first, for `eye.status`.
+    /// Every layer that is set, highest first, for `express.status`.
     pub fn active(&self) -> Vec<(Layer, Look)> {
         Layer::ALL
             .into_iter()
@@ -205,7 +205,7 @@ pub const STANDING: Look = Look::new(Rgb(0, 60, 255), Pattern::Solid, 2.0);
 pub const WALKING: Look = Look::new(Rgb(0, 220, 200), Pattern::Solid, 2.0);
 /// Fallen. Red, blinking at 2 Hz.
 pub const FALLEN: Look = Look::new(Rgb(255, 0, 0), Pattern::Blink, 0.5);
-/// `eye.identify`. White, blinking fast enough not to be mistaken for anything else.
+/// `express.identify`. White, blinking fast enough not to be mistaken for anything else.
 pub const IDENTIFY: Look = Look::new(Rgb(255, 255, 255), Pattern::Blink, 0.25);
 
 /// Below this commanded speed (m/s or rad/s, any axis) the robot counts as standing.

@@ -1,20 +1,21 @@
-# The eye: one WS2812-type RGB LED in Dukki's head, and the daemon that decides what it shows.
+# Expression: the outputs that show how Dukki is (the eye LED in its head), and the daemon that
+# decides what they show.
 #
-# Not part of Pollen's robot. `eyed` follows robotd's state stream for what the body is doing and
+# Not part of Pollen's robot. `expressd` follows robotd's state stream for what the body is doing and
 # takes requests on its own socket for everything else (mood, identify, the camera indicator).
 # The LED is driven by clocking its single-wire protocol out of SPI MOSI — see src/lib.rs.
 [package]
-name = "eye"
+name = "express"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [lib]
-name = "eye"
+name = "express"
 
 [[bin]]
-name = "eyed"
+name = "expressd"
 path = "src/main.rs"
 
 [dependencies]

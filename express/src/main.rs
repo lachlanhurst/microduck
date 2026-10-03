@@ -1,19 +1,19 @@
-//! `eyed`: owns the eye LED and decides what it shows.
+//! `expressd`: owns the robot's expressive outputs (the eye LED) and decides what they show.
 //!
 //! Three tasks share one [`Stack`] (see `lib.rs` for the layers):
 //!
 //! - **The follower** subscribes to robotd's `robot.state` at 10 Hz and writes the `fault` and
 //!   `ambient` layers. No robotd, or no frame for two seconds, is the `asleep` look: an eye that
 //!   froze on "walking" when the brain died would be worse than no eye.
-//! - **The server** answers `eye.set`, `eye.clear`, `eye.identify` and `eye.status` on
-//!   `/run/eyed/eye.sock`, one JSON-RPC request per line, as many as a client likes.
+//! - **The server** answers `express.set`, `express.clear`, `express.identify` and `express.status` on
+//!   `/run/expressd/express.sock`, one JSON-RPC request per line, as many as a client likes.
 //! - **The renderer** draws the winning look at ~30 Hz while it animates, and otherwise only on a
 //!   change (plus a refresh every second, so a glitched frame does not stick).
 //!
 //! The methods are this daemon's own and live here rather than in `duck-ipc-proto`: the eye is
 //! Dukki's addition, and keeping it out of the shared protocol keeps the upstream diff at zero.
 //!
-//! `eyed set mood 0 255 0 --pattern breathe` and friends are a client for the same socket, so a
+//! `expressd set mood 0 255 0 --pattern breathe` and friends are a client for the same socket, so a
 //! shell on the robot can drive the eye without writing JSON.
 
 use std::fs::File;
@@ -27,21 +27,21 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use duck_ipc_proto as proto;
-use eye::{Layer, Look, Order, Pattern, Rgb, Stack};
+use express::{Layer, Look, Order, Pattern, Rgb, Stack};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 
-const SOCKET: &str = "/run/eyed/eye.sock";
+const SOCKET: &str = "/run/expressd/express.sock";
 const SOCKET_MODE: u32 = 0o660;
 /// Whoever may watch the robot may set its mood, as with tofd's and robotd's sockets.
 const GROUP: &str = "robot";
 
-const SET: &str = "eye.set";
-const CLEAR: &str = "eye.clear";
-const IDENTIFY: &str = "eye.identify";
-const STATUS: &str = "eye.status";
+const SET: &str = "express.set";
+const CLEAR: &str = "express.clear";
+const IDENTIFY: &str = "express.identify";
+const STATUS: &str = "express.status";
 
 /// robot.state rate asked for. The eye changes at human speed; 10 Hz is already generous.
 const STATE_HZ: u32 = 10;
@@ -54,12 +54,12 @@ const FRAME: Duration = Duration::from_millis(33);
 const REFRESH: Duration = Duration::from_secs(1);
 
 #[derive(Parser)]
-#[command(about = "The eye LED daemon, and a client for it")]
+#[command(about = "The expression daemon (eye LED), and a client for it")]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// spidev node the LED's data line hangs off (setup-eye.sh names it).
+    /// spidev node the LED's data line hangs off (setup-express.sh names it).
     #[arg(long, default_value = "/dev/spidev-eye")]
     device: PathBuf,
     /// Brightness cap, 0 to 1. A bare 5050 LED at full scale is painful to look at.
@@ -199,13 +199,16 @@ impl Output {
             return Ok(Output::Fake);
         }
         let file = File::options().write(true).open(device).with_context(|| {
-            format!("opening {} (run setup-eye.sh, or --fake)", device.display())
+            format!(
+                "opening {} (run setup-express.sh, or --fake)",
+                device.display()
+            )
         })?;
         // spidev ioctls: _IOW('k', 1, u8) and _IOW('k', 4, u32).
         const SPI_IOC_WR_MODE: u64 = 0x4001_6b01;
         const SPI_IOC_WR_MAX_SPEED_HZ: u64 = 0x4004_6b04;
         let mode: u8 = 0;
-        let hz: u32 = eye::SPI_HZ;
+        let hz: u32 = express::SPI_HZ;
         // SAFETY: valid fd for the life of `file`; each ioctl reads one value of the size its
         // request number encodes, from a live local.
         unsafe {
@@ -222,7 +225,7 @@ impl Output {
     /// One frame. A single `write` is a single SPI transfer, which is what keeps the timing.
     fn show(&mut self, rgb: Rgb, brightness: f32, order: Order) -> std::io::Result<()> {
         match self {
-            Output::Spi(file) => file.write_all(&eye::encode(rgb, brightness, order)),
+            Output::Spi(file) => file.write_all(&express::encode(rgb, brightness, order)),
             Output::Fake => {
                 tracing::debug!(r = rgb.0, g = rgb.1, b = rgb.2, "eye");
                 Ok(())
@@ -258,7 +261,7 @@ async fn serve(args: Args) -> Result<()> {
         robotd: Mutex::new(false),
         changed: Notify::new(),
     });
-    shared.update(|s, now| s.set(Layer::Ambient, eye::ASLEEP, now, None));
+    shared.update(|s, now| s.set(Layer::Ambient, express::ASLEEP, now, None));
     tracing::info!(
         device = %args.device.display(), fake = args.fake, brightness = args.brightness,
         order = ?args.order, "starting"
@@ -326,7 +329,7 @@ async fn follow(socket: PathBuf, shared: Arc<Shared>) {
         *shared.robotd.lock().unwrap() = false;
         shared.update(|s, now| {
             s.clear(Layer::Fault);
-            s.set(Layer::Ambient, eye::ASLEEP, now, None);
+            s.set(Layer::Ambient, express::ASLEEP, now, None);
         });
         tokio::time::sleep(RETRY).await;
     }
@@ -371,7 +374,7 @@ async fn follow_once(socket: &Path, shared: &Shared) -> Result<()> {
                     continue;
                 }
             };
-        let (fault, ambient) = eye::from_state(&state);
+        let (fault, ambient) = express::from_state(&state);
         {
             let mut up = shared.robotd.lock().unwrap();
             if !*up {
@@ -402,9 +405,9 @@ fn bind(socket: &Path) -> Result<UnixListener> {
         UnixListener::bind(socket).with_context(|| format!("binding {}", socket.display()))?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(SOCKET_MODE))?;
     if let Err(e) = give_to_group(socket, GROUP) {
-        tracing::warn!(error = %e, group = GROUP, "the eye socket stays private to eyed");
+        tracing::warn!(error = %e, group = GROUP, "the express socket stays private to expressd");
     }
-    tracing::info!(path = %socket.display(), "serving eye.*");
+    tracing::info!(path = %socket.display(), "serving express.*");
     Ok(listener)
 }
 
@@ -415,7 +418,7 @@ async fn accept(listener: UnixListener, shared: Arc<Shared>, brightness: f32) {
                 let shared = shared.clone();
                 tokio::spawn(async move {
                     if let Err(e) = connection(stream, &shared, brightness).await {
-                        tracing::debug!(error = %e, "eye client ended");
+                        tracing::debug!(error = %e, "express client ended");
                     }
                 });
             }
@@ -496,7 +499,7 @@ fn handle(
         IDENTIFY => {
             let p: IdentifyParams = params(request)?;
             let ttl = Duration::from_secs_f32(p.seconds.clamp(0.5, 120.0));
-            shared.update(|s, now| s.set(Layer::Identify, eye::IDENTIFY, now, Some(ttl)));
+            shared.update(|s, now| s.set(Layer::Identify, express::IDENTIFY, now, Some(ttl)));
             Ok(ok())
         }
         STATUS => {
@@ -519,7 +522,7 @@ fn handle(
         }
         other => Err(proto::Error::new(
             proto::code::METHOD_NOT_FOUND,
-            format!("{other}: eyed serves {SET}, {CLEAR}, {IDENTIFY} and {STATUS}"),
+            format!("{other}: expressd serves {SET}, {CLEAR}, {IDENTIFY} and {STATUS}"),
         )),
     }
 }
@@ -579,7 +582,7 @@ async fn client(socket: &Path, command: &Command) -> Result<()> {
     };
     let stream = UnixStream::connect(socket)
         .await
-        .with_context(|| format!("connecting to {} (is eyed running?)", socket.display()))?;
+        .with_context(|| format!("connecting to {} (is expressd running?)", socket.display()))?;
     let (read, mut write) = stream.into_split();
     let request =
         serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
