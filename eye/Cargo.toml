@@ -1,0 +1,29 @@
+# The eye: one WS2812-type RGB LED in Dukki's head, and the daemon that decides what it shows.
+#
+# Not part of Pollen's robot. `eyed` follows robotd's state stream for what the body is doing and
+# takes requests on its own socket for everything else (mood, identify, the camera indicator).
+# The LED is driven by clocking its single-wire protocol out of SPI MOSI — see src/lib.rs.
+[package]
+name = "eye"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "eye"
+
+[[bin]]
+name = "eyed"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { workspace = true, features = ["derive"] }
+duck-ipc-proto = { path = "../duck-ipc-proto" }
+libc = "0.2"
+serde = { workspace = true }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "sync", "time", "io-util"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

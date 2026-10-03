@@ -1,0 +1,44 @@
+# The eye LED daemon. Dukki's addition; not part of Pollen's robot.
+#
+# Nothing depends on this unit and it depends on nothing: with no robotd the eye shows "asleep"
+# and keeps retrying, and with no LED fitted the daemon fails to open the spidev node and
+# systemd retries it every 5 s, quietly.
+[Unit]
+Description=Robot eye LED daemon
+After=local-fs.target
+
+[Service]
+Type=exec
+ExecStart=/opt/robot/daemon/current/bin/eyed
+User=eyed
+Group=eyed
+# robot — /dev/spidev-eye is root:robot 0660 (setup-eye.sh's udev rule), robotd's socket is the
+#         robot group's, and the eye socket is handed to it
+SupplementaryGroups=robot
+Restart=always
+RestartSec=5s
+
+# Same hardening as tofd. `PrivateDevices=` is deliberately NOT set: it would hide the spidev node.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+
+Environment=RUST_LOG=info
+StandardOutput=journal
+StandardError=journal
+RuntimeDirectory=eyed
+
+[Install]
+WantedBy=multi-user.target
