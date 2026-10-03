@@ -1,10 +1,13 @@
-# The expression daemon: the eye LED. Dukki's addition; not part of Pollen's robot.
+# The expression daemon: the eye LED and the head fan. Dukki's addition; not part of Pollen's robot.
 #
 # Nothing depends on this unit and it depends on nothing: with no robotd the eye shows "asleep"
 # and keeps retrying, and with no LED fitted the daemon fails to open the spidev node and
-# systemd retries it every 5 s, quietly.
+# systemd retries it every 5 s, quietly. A missing fan PWM is logged and the eye runs without it.
+#
+# The fan cools the compute module, so this daemon stopping must not stop the cooling: it leaves
+# the fan at full speed on the way out, and Restart= brings it back.
 [Unit]
-Description=Robot expression daemon (eye LED)
+Description=Robot expression daemon (eye LED and fan)
 After=local-fs.target
 
 [Service]
@@ -13,17 +16,19 @@ ExecStart=/opt/robot/daemon/current/bin/expressd
 User=expressd
 Group=expressd
 # robot — /dev/spidev-eye is root:robot 0660 (setup-express.sh's udev rule), robotd's socket is the
-#         robot group's, and the express socket is handed to it
+#         robot group's, the express socket is handed to it, and the fan's PWM files in sysfs
+#         are regrouped to it by setup-express.sh's other udev rule
 SupplementaryGroups=robot
 Restart=always
 RestartSec=5s
 
-# Same hardening as tofd. `PrivateDevices=` is deliberately NOT set: it would hide the spidev node.
+# Same hardening as tofd, less two settings. `PrivateDevices=` is deliberately NOT set: it would
+# hide the spidev node. Nor is `ProtectKernelTunables=`: it makes /sys read-only, and the fan's
+# duty cycle is a file in /sys.
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes

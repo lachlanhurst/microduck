@@ -1,16 +1,20 @@
-//! The eye: one WS2812-type RGB LED in the head, and what it should be showing.
+//! Expression: the outputs that show how the robot is, and what each should be doing.
 //!
-//! Not part of Pollen's robot. The eye shows what the robot is doing at a glance, and is the
-//! "LED under software control" that `docs/project/roadmap.md` (the visible camera indicator)
-//! and `docs/design/app-path-design.md` (`identify`) both found missing.
+//! Not part of Pollen's robot. Two outputs today, both visible:
+//!
+//! - **The eye**, one WS2812-type RGB LED in the head. It shows what the robot is doing at a
+//!   glance, and is the "LED under software control" that `docs/project/roadmap.md` (the
+//!   visible camera indicator) and `docs/design/app-path-design.md` (`identify`) found missing.
+//! - **The fan**, a 2-wire 5 V axial fan on a PWM-driven MOSFET. Its first job is cooling the
+//!   compute module; its second is expression (a burst of excitement, a slow swell).
 //!
 //! This file is the part with no hardware in it, so it is the part with tests: colours,
 //! patterns, the layer stack that decides who wins, the mapping from `robot.state` to a look,
-//! and the SPI encoding of the LED's single-wire protocol. `main.rs` owns the device, the
-//! sockets and the clock.
+//! the fan's thermal curve and stall handling, and the SPI encoding of the LED's single-wire
+//! protocol. `main.rs` owns the devices, the sockets and the clock.
 //!
-//! **Layers, highest first.** Each layer holds at most one [`Look`]; the highest non-empty one
-//! is shown.
+//! **Layers, highest first.** The eye and the fan each have a [`Stack`] of these; each layer
+//! holds at most one look per output, and the highest non-empty one is shown.
 //!
 //! | Layer | Set by | For |
 //! |---|---|---|
@@ -22,6 +26,10 @@
 //!
 //! `fault` and `ambient` are derived, never set: a client that could paint over "fallen" or
 //! fake "walking" would make the eye a liar about the one thing it is for.
+//!
+//! **The fan has a floor.** Cooling is not a layer a client can outrank: the speed is the
+//! larger of what the winning layer asks for and what the SoC temperature needs
+//! ([`FanCurve`]). A mood can spin the fan up or animate it above that floor, never below it.
 
 use std::time::Duration;
 
@@ -56,6 +64,32 @@ pub enum Pattern {
     Pulse,
 }
 
+impl Pattern {
+    /// The pattern's level, 0 to 1, at `t` seconds into a cycle of `period_s`.
+    pub fn factor(self, t: f32, period_s: f32) -> f32 {
+        let phase = (t / period_s.max(0.05)).fract();
+        match self {
+            Pattern::Solid => 1.0,
+            // 0.1 to 1.0, so the trough is dim rather than off: off reads as "dead".
+            Pattern::Breathe => 0.1 + 0.9 * (0.5 - 0.5 * (std::f32::consts::TAU * phase).cos()),
+            Pattern::Blink => {
+                if phase < 0.5 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Pattern::Pulse => {
+                if phase < 0.12 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
+
 /// What a layer asks the eye to show.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Look {
@@ -82,30 +116,7 @@ impl Look {
 
     /// The colour at `t` seconds since the daemon started, before brightness.
     pub fn at(&self, t: f32) -> Rgb {
-        let period = self.period_s.max(0.05);
-        let phase = (t / period).fract();
-        match self.pattern {
-            Pattern::Solid => self.colour,
-            Pattern::Breathe => {
-                // 0.1 to 1.0, so the trough is dim rather than off: off reads as "dead".
-                let s = 0.5 - 0.5 * (std::f32::consts::TAU * phase).cos();
-                self.colour.scale(0.1 + 0.9 * s)
-            }
-            Pattern::Blink => {
-                if phase < 0.5 {
-                    self.colour
-                } else {
-                    Rgb::OFF
-                }
-            }
-            Pattern::Pulse => {
-                if phase < 0.12 {
-                    self.colour
-                } else {
-                    Rgb::OFF
-                }
-            }
-        }
+        self.colour.scale(self.pattern.factor(t, self.period_s))
     }
 
     /// Whether the output changes with time, so the render loop knows it may idle.
@@ -146,19 +157,28 @@ impl Layer {
 
 /// One layer's request, with an optional expiry in daemon seconds.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Entry {
-    look: Look,
+struct Entry<T> {
+    look: T,
     until: Option<f32>,
 }
 
-/// The stack itself. Time is passed in as seconds since start, so tests need no clock.
-#[derive(Debug, Clone, Default)]
-pub struct Stack {
-    layers: [Option<Entry>; 5],
+/// The stack itself, one per output. Time is passed in as seconds since start, so tests need
+/// no clock.
+#[derive(Debug, Clone)]
+pub struct Stack<T> {
+    layers: [Option<Entry<T>>; 5],
 }
 
-impl Stack {
-    pub fn set(&mut self, layer: Layer, look: Look, now: f32, ttl: Option<Duration>) {
+impl<T> Default for Stack<T> {
+    fn default() -> Self {
+        Self {
+            layers: [None, None, None, None, None],
+        }
+    }
+}
+
+impl<T: Copy> Stack<T> {
+    pub fn set(&mut self, layer: Layer, look: T, now: f32, ttl: Option<Duration>) {
         let until = ttl.map(|d| now + d.as_secs_f32());
         self.layers[layer.index()] = Some(Entry { look, until });
     }
@@ -168,7 +188,7 @@ impl Stack {
     }
 
     /// The winning layer and its look, dropping anything that has expired.
-    pub fn top(&mut self, now: f32) -> Option<(Layer, Look)> {
+    pub fn top(&mut self, now: f32) -> Option<(Layer, T)> {
         for layer in Layer::ALL {
             let slot = &mut self.layers[layer.index()];
             if let Some(entry) = slot {
@@ -183,7 +203,7 @@ impl Stack {
     }
 
     /// Every layer that is set, highest first, for `express.status`.
-    pub fn active(&self) -> Vec<(Layer, Look)> {
+    pub fn active(&self) -> Vec<(Layer, T)> {
         Layer::ALL
             .into_iter()
             .filter_map(|l| self.layers[l.index()].map(|e| (l, e.look)))
@@ -225,6 +245,120 @@ pub fn from_state(state: &RobotState) -> (Option<Look>, Look) {
         }
     };
     (fault, ambient)
+}
+
+// ── The fan ──────────────────────────────────────────────────────────────────
+
+/// What a layer asks the fan to do: a speed, 0 to 1, moved by a pattern.
+///
+/// The same patterns as the eye, and they read the same way on a fan: `breathe` swells and
+/// settles, `blink` is bursts, `pulse` is a short puff each period. The fan's own inertia
+/// smooths them, so periods under a couple of seconds mostly come out as a lower steady speed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FanLook {
+    pub level: f32,
+    #[serde(default)]
+    pub pattern: Pattern,
+    #[serde(default = "default_fan_period")]
+    pub period_s: f32,
+}
+
+fn default_fan_period() -> f32 {
+    4.0
+}
+
+impl FanLook {
+    /// The requested speed at `t`, 0 to 1.
+    pub fn at(&self, t: f32) -> f32 {
+        self.level.clamp(0.0, 1.0) * self.pattern.factor(t, self.period_s)
+    }
+
+    pub fn animated(&self) -> bool {
+        self.pattern != Pattern::Solid && self.level > 0.0
+    }
+}
+
+/// The cooling floor: off below `off_c`, and once the SoC has passed `on_c`, a ramp from
+/// `min` at `on_c` to full at `full_c`. Between `off_c` and `on_c` it holds whatever it was
+/// doing, so a SoC sitting near one threshold does not cycle the fan.
+#[derive(Debug, Clone, Copy)]
+pub struct FanCurve {
+    pub off_c: f32,
+    pub on_c: f32,
+    pub full_c: f32,
+    pub min: f32,
+    running: bool,
+}
+
+impl FanCurve {
+    pub fn new(off_c: f32, on_c: f32, full_c: f32, min: f32) -> Self {
+        Self {
+            off_c,
+            on_c,
+            full_c,
+            min,
+            running: false,
+        }
+    }
+
+    /// The floor for this temperature. `None` is an unreadable temperature, which is full
+    /// speed: not knowing is not a reason to let the SoC cook.
+    pub fn floor(&mut self, temp_c: Option<f32>) -> f32 {
+        let Some(t) = temp_c else {
+            return 1.0;
+        };
+        if t >= self.on_c {
+            self.running = true;
+        } else if t < self.off_c {
+            self.running = false;
+        }
+        if !self.running {
+            return 0.0;
+        }
+        let span = (self.full_c - self.on_c).max(0.1);
+        (self.min + (1.0 - self.min) * ((t - self.on_c) / span)).clamp(self.min, 1.0)
+    }
+}
+
+/// From a wanted speed to a PWM duty, for a 2-wire fan on a low-side switch.
+///
+/// Such a fan stalls below some duty (its own electronics brown out), so anything above zero
+/// is raised to `min`; and it may not start from rest at `min`, so a start from stopped runs at
+/// full for `kick_s` first.
+#[derive(Debug, Clone, Copy)]
+pub struct FanDrive {
+    pub min: f32,
+    pub kick_s: f32,
+    kick_until: Option<f32>,
+    running: bool,
+}
+
+impl FanDrive {
+    pub fn new(min: f32, kick_s: f32) -> Self {
+        Self {
+            min,
+            kick_s,
+            kick_until: None,
+            running: false,
+        }
+    }
+
+    /// The duty for `want` (0 to 1) at `now` seconds.
+    pub fn duty(&mut self, want: f32, now: f32) -> f32 {
+        if want <= 0.0 {
+            self.running = false;
+            self.kick_until = None;
+            return 0.0;
+        }
+        if !self.running {
+            self.running = true;
+            self.kick_until = Some(now + self.kick_s);
+        }
+        if self.kick_until.is_some_and(|until| now < until) {
+            return 1.0;
+        }
+        want.clamp(self.min, 1.0)
+    }
 }
 
 // ── Output ───────────────────────────────────────────────────────────────────
@@ -368,5 +502,59 @@ mod tests {
         assert_eq!(from_state(&state).1, LIMP);
         state.safety.fallen = true;
         assert_eq!(from_state(&state).0, Some(FALLEN));
+    }
+
+    #[test]
+    fn the_cooling_floor_has_hysteresis_and_a_ramp() {
+        let mut c = FanCurve::new(50.0, 60.0, 75.0, 0.3);
+        assert_eq!(c.floor(Some(55.0)), 0.0, "below on_c from cold: off");
+        assert_eq!(c.floor(Some(60.0)), 0.3);
+        assert_eq!(c.floor(Some(55.0)), 0.3, "between thresholds: holds");
+        assert!((c.floor(Some(67.5)) - 0.65).abs() < 1e-4);
+        assert_eq!(c.floor(Some(90.0)), 1.0);
+        assert_eq!(c.floor(Some(49.9)), 0.0, "below off_c: off again");
+    }
+
+    /// Not knowing the temperature is not a reason to let the SoC cook.
+    #[test]
+    fn an_unreadable_temperature_is_full_speed() {
+        assert_eq!(FanCurve::new(50.0, 60.0, 75.0, 0.3).floor(None), 1.0);
+    }
+
+    /// A 2-wire fan stalls below its minimum and may not start from rest at it.
+    #[test]
+    fn the_drive_kicks_from_rest_and_never_asks_for_a_stall() {
+        let mut d = FanDrive::new(0.3, 0.5);
+        assert_eq!(d.duty(0.0, 0.0), 0.0);
+        assert_eq!(d.duty(0.1, 1.0), 1.0, "start from rest: kick");
+        assert_eq!(d.duty(0.1, 1.4), 1.0);
+        assert_eq!(
+            d.duty(0.1, 1.5),
+            0.3,
+            "after the kick: clamped to min, not 0.1"
+        );
+        assert_eq!(d.duty(0.8, 2.0), 0.8, "already running: no second kick");
+        assert_eq!(d.duty(0.0, 3.0), 0.0);
+        assert_eq!(d.duty(0.5, 3.1), 1.0, "stopped again, so kicks again");
+    }
+
+    #[test]
+    fn fan_patterns_scale_the_level() {
+        let bursts = FanLook {
+            level: 0.6,
+            pattern: Pattern::Blink,
+            period_s: 2.0,
+        };
+        assert!((bursts.at(0.5) - 0.6).abs() < 1e-6);
+        assert_eq!(bursts.at(1.5), 0.0);
+        assert!(bursts.animated());
+        assert!(
+            !FanLook {
+                level: 0.0,
+                pattern: Pattern::Blink,
+                period_s: 2.0
+            }
+            .animated()
+        );
     }
 }
