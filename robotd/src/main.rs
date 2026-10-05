@@ -1053,8 +1053,39 @@ async fn main() -> ExitCode {
 }
 
 /// Enable torque and ramp to the home pose.
-#[cfg(target_os = "linux")]
 fn run_init(params: &Params, duration: Duration) -> ExitCode {
+    match params.bus.backend {
+        params::Backend::Bridge => run_init_bridge(params, duration),
+        params::Backend::Dynamixel => run_init_dynamixel(params, duration),
+    }
+}
+
+/// `init` through the servo bridge. Same order as the Dynamixel path and for the same reasons:
+/// gain before the ramp, and torque on before anything moves — `BridgeIo` holds the present pose
+/// when torque comes on, so enabling it is not itself a move.
+fn run_init_bridge(params: &Params, duration: Duration) -> ExitCode {
+    let mut io = match open_bridge(&params.bus, 0) {
+        Some(io) => io,
+        None => return ExitCode::FAILURE,
+    };
+    if let Err(e) = io.set_gain(params.policy.gain) {
+        tracing::error!(error = %e, gain = params.policy.gain, "cannot set the position gain");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = io.set_torque(true) {
+        tracing::error!(error = %e, "cannot enable torque");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = io.interpolate_to(&DEFAULT_POSITION, duration, Duration::from_millis(20)) {
+        tracing::error!(error = %e, "interpolation to the home pose failed");
+        return ExitCode::FAILURE;
+    }
+    tracing::warn!(?duration, "at home pose, torque enabled");
+    ExitCode::SUCCESS
+}
+
+#[cfg(target_os = "linux")]
+fn run_init_dynamixel(params: &Params, duration: Duration) -> ExitCode {
     // The same open as the daemon's, replacement adoption included: `init` is what someone
     // reaches for right after a motor swap, and it must not be the one path that refuses the
     // new servo.
@@ -1087,7 +1118,7 @@ fn run_init(params: &Params, duration: Duration) -> ExitCode {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn run_init(_params: &Params, _duration: Duration) -> ExitCode {
+fn run_init_dynamixel(_params: &Params, _duration: Duration) -> ExitCode {
     tracing::error!("init needs a real bus; this build is not on the robot");
     ExitCode::FAILURE
 }
@@ -1163,6 +1194,19 @@ fn spawn_control_thread(
                 return;
             }
 
+            // The servo bridge: its own open, since none of the Dynamixel register checks and
+            // replacement adoption below apply to it. Not linux-only — the bridge is a serial
+            // port like any other, so a laptop with a USB-UART adapter can drive one too.
+            if bus.backend == params::Backend::Bridge {
+                runtime.block_on(async move {
+                    if let Some(io) = open_bridge_waiting(&bus, &state).await {
+                        control_loop(io, state, intents, params, params_path, period, poweroff)
+                            .await;
+                    }
+                });
+                return;
+            }
+
             // Waiting, not one shot. `open_bus` verifies motor registers, which means it
             // talks to the servos — so on an unpowered board it fails and this used to fall
             // straight off the end of the thread. No control loop was ever created, and
@@ -1175,6 +1219,51 @@ fn spawn_control_thread(
                 }
             });
         })
+}
+
+/// Open the servo bridge, waiting for it to answer. The same contract as [`open_bus_waiting`]: a
+/// bridge that is unpowered or unplugged is a condition someone fixes, not a reason to give up
+/// on the control loop.
+async fn open_bridge_waiting(
+    bus: &params::Bus,
+    state: &RobotState,
+) -> Option<duck_control::bridge::SerialBridgeIo> {
+    let mut attempt = 0u32;
+    while !state.shutdown.load(Ordering::Relaxed) {
+        if let Some(io) = open_bridge(bus, attempt) {
+            state.startup_bus_failures.store(0, Ordering::Relaxed);
+            return Some(io);
+        }
+        attempt += 1;
+        state.startup_bus_failures.store(attempt, Ordering::Relaxed);
+        tokio::time::sleep(STARTUP_RETRY_INTERVAL).await;
+    }
+    None
+}
+
+/// Open the bridge once, or explain why not — loudly on the first attempt and every thirtieth,
+/// as `open_bus` does.
+fn open_bridge(bus: &params::Bus, attempt: u32) -> Option<duck_control::bridge::SerialBridgeIo> {
+    let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
+    let config = duck_control::bridge::BridgeConfig {
+        kp_per_gain: bus.bridge_kp_per_gain,
+        kd: bus.bridge_kd,
+    };
+    match duck_control::bridge::BridgeIo::open(&bus.port, bus.bridge_baud, config) {
+        Ok(io) => Some(io),
+        Err(e) => {
+            if loud {
+                tracing::error!(
+                    error = %e,
+                    port = bus.port.as_str(),
+                    baud = bus.bridge_baud,
+                    attempt,
+                    "cannot reach the servo bridge"
+                );
+            }
+            None
+        }
+    }
 }
 
 /// The real bus on the board; a fake elsewhere, so `open_bus_waiting` has one signature.

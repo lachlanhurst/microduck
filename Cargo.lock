@@ -1114,9 +1114,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "duck-bridge-proto"
+version = "0.15.1"
+dependencies = [
+ "crc32fast",
+]
+
+[[package]]
 name = "duck-control"
 version = "0.15.1"
 dependencies = [
+ "duck-bridge-proto",
  "duck-ipc-proto",
  "libloading 0.8.9",
  "ort",

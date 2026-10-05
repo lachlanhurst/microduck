@@ -16,10 +16,24 @@
 # is far easier to diagnose remotely than a daemon that will not run.
 
 [bus]
-# Serial port the 15 servos and the imu_to_dxl board share. /dev/ttyS2 is the Radxa
-# Zero 3W's wiring; a board wired differently can also be overridden per-invocation with
+# What is on the other end of the port. This build's robot (the J288 rework, "dukki") has a
+# servo bridge: an STM32 that owns three J288 bus segments and the trunk IMU, reached over UART7
+# on the CM4-NANO-A header. "dynamixel" is Pollen's XL330 bus. docs/design/bridge-protocol.md.
+# backend = "bridge"
+
+# Serial port of the bus or the bridge. /dev/ttyS7 is UART7 on the CM4-NANO-A header with the
+# overlay from dukki's scripts/compute/setup-bridge-link.sh; /dev/ttyS2 was the Radxa Zero 3W's
+# Dynamixel wiring. A board wired differently can also be overridden per-invocation with
 # `robotd --port`, which is the dev escape hatch rather than the thing to edit here.
-port = "/dev/ttyS2"
+port = "/dev/ttyS7"
+
+# Link baud to the bridge; must match the bridge firmware. Needs a robotd restart.
+# bridge_baud = 2000000
+
+# J288 kp (N·m/rad) per unit of policy gain: 0.01 makes the policy's gain of 200 into 2.0
+# N·m/rad and the limp gain of 50 into 0.5. And the kd on every driven joint, N·m·s/rad.
+# bridge_kp_per_gain = 0.01
+# bridge_kd = 0.05
 
 # Read the bus with fast sync read (protocol 2.0 instruction 0x8A) instead of a plain sync
 # read. The 16 devices append their answers to one status packet rather than each sending

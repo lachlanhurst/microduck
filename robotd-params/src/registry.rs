@@ -110,6 +110,26 @@ pub const REGISTRY: &[Entry] = &[
         Kind::Bool,
         "Read the bus with fast sync read — needs XL330 firmware v46+",
     ),
+    entry(
+        "bus.backend",
+        Kind::Choice(&["dynamixel", "bridge"]),
+        "Dynamixel bus, or the J288 servo bridge",
+    ),
+    entry(
+        "bus.bridge_baud",
+        Kind::Integer,
+        "Link baud rate to the servo bridge",
+    ),
+    entry(
+        "bus.bridge_kp_per_gain",
+        Kind::Float,
+        "J288 kp (N·m/rad) per unit of policy gain",
+    ),
+    entry(
+        "bus.bridge_kd",
+        Kind::Float,
+        "J288 kd (N·m·s/rad) on every driven joint",
+    ),
     // ── [control] ────────────────────────────────────────────────────────────
     entry("control.hz", Kind::Integer, "Control loop rate"),
     entry(

@@ -1851,8 +1851,9 @@ impl Default for SafetyParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Bus {
-    /// Serial port the servos and the IMU board share. The Radxa Zero 3W wires them to
-    /// `/dev/ttyS2`.
+    /// Serial port of the servo bridge, or of the Dynamixel bus the servos and the IMU board
+    /// share. The bridge is on UART7 of the CM4-NANO-A header, `/dev/ttyS7`; the Radxa Zero 3W
+    /// wired the Dynamixel bus to `/dev/ttyS2`.
     pub port: String,
     /// Read the bus with fast sync read (protocol 2.0 instruction 0x8A) rather than a plain
     /// sync read: the sixteen devices append their blocks to one status packet instead of
@@ -1871,6 +1872,28 @@ pub struct Bus {
     /// the bus drops, `update_gate` sees an unhealthy robot, and a release that turned this on
     /// against firmware that cannot do it is rolled back on its own.
     pub fast_sync_read: bool,
+    /// What is on the other end of `port`: the XL330 Dynamixel bus Pollen ships, or the servo
+    /// bridge — an STM32 that owns three J288 bus segments and the trunk IMU and speaks
+    /// `duck-bridge-proto`. The Dynamixel keys above mean nothing to a bridge, and the bridge
+    /// keys below nothing to a Dynamixel bus.
+    pub backend: Backend,
+    /// Link baud rate to the bridge. The bridge firmware fixes its own; this must match it.
+    pub bridge_baud: u32,
+    /// J288 kp, N·m/rad, per unit of the policy's XL330-style gain (`policy.gain`, the limp
+    /// gain). 0.01 makes the policy's 200 into 2.0 N·m/rad, the value the J288 sim-to-real runs
+    /// used. A retune, not a unit conversion: there is no XL330 figure this reproduces.
+    pub bridge_kp_per_gain: f64,
+    /// J288 kd, N·m·s/rad, on every driven joint. The J288's current loop cancels back-EMF, so
+    /// this and friction are all the damping a joint has.
+    pub bridge_kd: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    Dynamixel,
+    #[default]
+    Bridge,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1939,8 +1962,13 @@ pub struct UpdateGate {
 impl Default for Bus {
     fn default() -> Self {
         Self {
-            port: "/dev/ttyS2".into(),
+            // This fork's robot: the J288 servo bridge on UART7 of the CM4-NANO-A header.
+            port: "/dev/ttyS7".into(),
             fast_sync_read: true,
+            backend: Backend::Bridge,
+            bridge_baud: 2_000_000,
+            bridge_kp_per_gain: 0.01,
+            bridge_kd: 0.05,
         }
     }
 }
@@ -1984,6 +2012,12 @@ pub enum ParamsError {
         path: String,
         #[source]
         source: toml::de::Error,
+    },
+    #[error("{path}: bus.{key} must be positive, got {got}")]
+    BridgeValue {
+        path: String,
+        key: &'static str,
+        got: f64,
     },
     #[error("{path}: control.hz must be between 1 and 1000, got {got}")]
     Rate { path: String, got: u32 },
@@ -2078,6 +2112,20 @@ impl Params {
     /// Reject values that would produce a loop that cannot work, at startup rather than as
     /// a division by zero three seconds later.
     fn validate(&self, path: &Path) -> Result<(), ParamsError> {
+        for (key, got) in [
+            ("bridge_baud", self.bus.bridge_baud as f64),
+            ("bridge_kp_per_gain", self.bus.bridge_kp_per_gain),
+            ("bridge_kd", self.bus.bridge_kd),
+        ] {
+            // `is_sign_positive` alone would pass NaN and zero; a hand-edited file can produce both.
+            if got.is_nan() || got <= 0.0 {
+                return Err(ParamsError::BridgeValue {
+                    path: path.display().to_string(),
+                    key,
+                    got,
+                });
+            }
+        }
         if self.control.hz == 0 || self.control.hz > 1000 {
             return Err(ParamsError::Rate {
                 path: path.display().to_string(),

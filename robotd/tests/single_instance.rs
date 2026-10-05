@@ -145,10 +145,8 @@ async fn a_failed_init_releases_the_lock_without_creating_a_socket() {
     let mut init = Robotd::spawn(&socket, &["--port", port.to_str().unwrap(), "init"]);
     let (status, log) = init.wait_for_exit().await;
     assert_eq!(status.code(), Some(1), "{status}: {log}");
-    #[cfg(target_os = "linux")]
-    assert!(log.contains("cannot open the bus"), "{log}");
-    #[cfg(not(target_os = "linux"))]
-    assert!(log.contains("init needs a real bus"), "{log}");
+    // This fork's default backend is the servo bridge, which opens the same way everywhere.
+    assert!(log.contains("cannot reach the servo bridge"), "{log}");
     assert!(!socket.exists(), "init must not bind a listener");
     let inode = std::fs::metadata(&lock_path).unwrap().ino();
 

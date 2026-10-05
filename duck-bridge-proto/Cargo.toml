@@ -1,0 +1,13 @@
+[package]
+name = "duck-bridge-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wire protocol between the compute module and the servo bridge MCU"
+
+# `no_std` and near-dependency-free, because the other end of this protocol is the bridge's
+# firmware: an STM32G474 with no allocator, built from a different repository against these same
+# types. Anything added here has to build for `thumbv7em-none-eabihf` too.
+[dependencies]
+# The standard CRC-32 (ISO-HDLC, as zlib and Ethernet use), table-driven without std.
+crc32fast = { version = "1.5", default-features = false }
