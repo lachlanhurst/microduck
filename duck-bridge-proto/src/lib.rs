@@ -217,7 +217,7 @@ pub const ABSENT: u8 = 0xFF;
 /// One servo, as the bridge last heard from it.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ServoState {
-    /// Bus segment the servo answered on (0 = A, 1 = B, 2 = C), or [`ABSENT`]. Every other field
+    /// Bus segment the servo answered on (0 = A, 1 = B, 2 = C, 3 = D), or [`ABSENT`]. Every other field
     /// is meaningless for an absent servo.
     pub segment: u8,
     /// J288 mode from the last reply.

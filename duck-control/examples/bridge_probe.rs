@@ -118,7 +118,7 @@ fn main() {
         }
         println!(
             "  id {id:2} seg {} pos {:+8.3} vel {:+6.2} spd {:+6.2} tq {:+6.3} {:4.1} V {}/{} C mode {} flags {:#04x} err {:#x} age {} us ok {} fail {}",
-            ["A", "B", "C"][v.segment as usize % 3],
+            ["A", "B", "C", "D"][v.segment as usize % 4],
             v.position,
             v.velocity,
             v.speed,

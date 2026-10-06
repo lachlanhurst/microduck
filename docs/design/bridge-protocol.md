@@ -4,8 +4,8 @@ How the compute module talks to the servo bridge on a J288 microduck: the link, 
 each message carries, the timing and the watchdog. `duck-bridge-proto` is the one implementation
 and is built by both ends; this page owns the reasoning, the crate owns the byte layout.
 
-The bridge is an STM32G474 on a WeAct core board in the trunk. It owns the three J288 servo bus
-segments (single-wire, 6 Mbps) and the trunk IMU (LSM6DSV16X with on-chip SFLP fusion), and its
+The bridge is an STM32G474 on a WeAct core board in the trunk. It owns up to four J288 servo bus
+segments (single-wire, 6 Mbps; three on this robot) and the trunk IMU (LSM6DSV16X with on-chip SFLP fusion), and its
 firmware lives in the `dukki` repository (`src/bridge`). On this side, `duck-control`'s
 `BridgeIo` implements `RobotIo` over the protocol, and robotd selects it with `[bus] backend =
 "bridge"`. The hardware — pins, wiring, why there is a bridge at all — is `dukki`'s
