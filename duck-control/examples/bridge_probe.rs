@@ -6,12 +6,33 @@
 //!
 //! Prints what the bridge says it is, the round-trip time of each state request, how many ticks
 //! got no answer, and the last state: every servo and the IMU.
+//!
+//! Also stands in for robotd's side of the shutdown button, without shutting anything down. It
+//! sends a `HostStatus` once a second with the hottest thermal zone's temperature. When the
+//! bridge raises `SHUTDOWN_REQUESTED` it says so, reports `ShuttingDown` at once, keeps
+//! commanding for `SIT_STAND_IN` as robotd would while the robot sits, then stops early the way
+//! a powered-off compute module does.
 
 use std::time::{Duration, Instant};
 
 use duck_bridge_proto as proto;
 use duck_control::bridge::{BridgeConfig, BridgeIo};
 use duck_control::{JointTargets, RobotIo};
+
+/// Stands in for robotd's sit-down before power-off.
+const SIT_STAND_IN: Duration = Duration::from_secs(3);
+const STATUS_EVERY: Duration = Duration::from_secs(1);
+
+/// The hottest thermal zone, °C, as robotd reports it.
+fn hottest_zone_c() -> Option<f64> {
+    let zones = std::fs::read_dir("/sys/class/thermal").ok()?;
+    zones
+        .filter_map(|z| std::fs::read_to_string(z.ok()?.path().join("temp")).ok())
+        .filter_map(|t| t.trim().parse::<f64>().ok())
+        .filter(|&mc| mc > 0.0)
+        .map(|mc| mc / 1000.0)
+        .reduce(f64::max)
+}
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -50,9 +71,37 @@ fn main() {
     let mut last_err = None;
     let mut next = Instant::now();
     let start = Instant::now();
+    let mut head = proto::HeadState::Running;
+    let mut status_due = Instant::now();
+    let mut shutting_since: Option<Instant> = None;
+    let mut ran = 0u64;
     for tick in 0..ticks {
+        ran += 1;
         let t0 = Instant::now();
-        match io.state() {
+        let state = io.state();
+        if state.is_ok() && io.shutdown_requested() && head == proto::HeadState::Running {
+            println!(
+                "shutdown requested by the bridge at {:.2} s: robotd would sit and power off; reporting shutting down",
+                start.elapsed().as_secs_f64()
+            );
+            head = proto::HeadState::ShuttingDown;
+            shutting_since = Some(Instant::now());
+            status_due = Instant::now();
+        }
+        if Instant::now() >= status_due {
+            if let Err(e) = io.send_host_status(head, hottest_zone_c()) {
+                eprintln!("host status not sent: {e}");
+            }
+            status_due += STATUS_EVERY;
+        }
+        if shutting_since.is_some_and(|t| t.elapsed() >= SIT_STAND_IN) {
+            println!(
+                "stopping at {:.2} s, as a powered-off compute module would",
+                start.elapsed().as_secs_f64()
+            );
+            break;
+        }
+        match state {
             Ok(_) => round_trips.push(t0.elapsed()),
             Err(e) => {
                 failures += 1;
@@ -79,7 +128,7 @@ fn main() {
             .map_or(0.0, |d| d.as_secs_f64() * 1e3)
     };
     println!(
-        "{ticks} ticks at {hz} Hz: {} answered, {failures} failures; state round trip ms: median {:.2} p95 {:.2} max {:.2}",
+        "{ran} ticks at {hz} Hz: {} answered, {failures} failures; state round trip ms: median {:.2} p95 {:.2} max {:.2}",
         round_trips.len(),
         pct(0.5),
         pct(0.95),

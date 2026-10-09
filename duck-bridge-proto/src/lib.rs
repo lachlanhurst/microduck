@@ -7,13 +7,14 @@
 //! by both ends — `duck-control` on the compute module and the bridge firmware — so the two cannot
 //! drift apart.
 //!
-//! Three exchanges:
+//! Four exchanges:
 //!
 //! | compute sends | bridge answers | when |
 //! |---|---|---|
 //! | [`Command`] | nothing | once per control tick, after the policy runs |
 //! | [`StateRequest`] | [`State`] | once per control tick, at the start |
 //! | [`InfoRequest`] | [`Info`] | at startup |
+//! | [`HostStatus`] | nothing | once a second, and at once when the compute module's state changes |
 //!
 //! Every frame is `SYNC (2) · version (1) · kind (1) · payload length (2) · payload · CRC-32 (4)`,
 //! little-endian throughout, with the CRC over everything after the sync bytes. A receiver that
@@ -52,6 +53,7 @@ pub enum Kind {
     Command = 0x01,
     StateRequest = 0x02,
     InfoRequest = 0x03,
+    HostStatus = 0x04,
     State = 0x81,
     Info = 0x83,
 }
@@ -62,6 +64,7 @@ impl Kind {
             0x01 => Kind::Command,
             0x02 => Kind::StateRequest,
             0x03 => Kind::InfoRequest,
+            0x04 => Kind::HostStatus,
             0x81 => Kind::State,
             0x83 => Kind::Info,
             _ => return None,
@@ -192,6 +195,30 @@ pub struct StateRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct InfoRequest;
 
+/// What the compute module is doing, for the bridge's status display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum HeadState {
+    #[default]
+    Running = 1,
+    /// Shutting down, from a [`state_flags::SHUTDOWN_REQUESTED`] or any other cause. The bridge
+    /// counts the head as off once commands have stopped for a while after this.
+    ShuttingDown = 2,
+}
+
+/// The compute module's state and temperature, for the bridge to show. Not answered. Bridge
+/// firmware from before this message counts it as a bad message and carries on, so it needed no
+/// version bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HostStatus {
+    pub state: HeadState,
+    /// The hottest thermal zone on the compute module, 0.1 °C; [`TEMP_UNKNOWN`] when unread.
+    pub cpu_temp_dc: i16,
+}
+
+/// [`HostStatus::cpu_temp_dc`] when the temperature is not known.
+pub const TEMP_UNKNOWN: i16 = i16::MIN;
+
 // ---------------------------------------------------------------- bridge to compute
 
 /// [`State::flags`] bits.
@@ -201,6 +228,10 @@ pub mod state_flags {
     pub const WATCHDOG: u16 = 1 << 0;
     /// At least one [`crate::Command`] has arrived since the bridge started.
     pub const COMMANDED: u16 = 1 << 1;
+    /// The bridge's shutdown button was held: the compute module should shut down. Set until a
+    /// [`crate::HostStatus`] reports [`crate::HeadState::ShuttingDown`]. Compute-side software
+    /// from before this bit ignores it, so it needed no version bump.
+    pub const SHUTDOWN_REQUESTED: u16 = 1 << 2;
 }
 
 /// [`ServoState::flags`] bits.
@@ -411,6 +442,28 @@ impl Message for InfoRequest {
 
     fn read_payload(_r: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(InfoRequest)
+    }
+}
+
+impl Message for HostStatus {
+    const KIND: Kind = Kind::HostStatus;
+    const PAYLOAD_LEN: usize = 1 + 2;
+
+    fn write_payload(&self, w: &mut Writer<'_>) {
+        w.u8(self.state as u8);
+        w.u16(self.cpu_temp_dc as u16);
+    }
+
+    fn read_payload(r: &mut Reader<'_>) -> Result<Self, Error> {
+        let state = match r.u8() {
+            1 => HeadState::Running,
+            2 => HeadState::ShuttingDown,
+            _ => return Err(Error::BadValue),
+        };
+        Ok(HostStatus {
+            state,
+            cpu_temp_dc: r.u16() as i16,
+        })
     }
 }
 
@@ -857,6 +910,7 @@ mod tests {
         assert_eq!(frame_of(&sample_command()).len(), 367);
         assert_eq!(frame_of(&sample_state()).len(), 628);
         assert_eq!(frame_of(&StateRequest::default()).len(), 18);
+        assert_eq!(frame_of(&HostStatus::default()).len(), 13);
     }
 
     /// A stream arrives in arbitrary pieces; a frame split across reads must still decode.
@@ -914,6 +968,39 @@ mod tests {
 
     /// An undefined mode must fail the decode: the bridge must never drive a servo in a mode it
     /// guessed.
+    #[test]
+    fn host_status_round_trips() {
+        for status in [
+            HostStatus {
+                state: HeadState::Running,
+                cpu_temp_dc: 543,
+            },
+            HostStatus {
+                state: HeadState::ShuttingDown,
+                cpu_temp_dc: -12,
+            },
+            HostStatus {
+                state: HeadState::Running,
+                cpu_temp_dc: TEMP_UNKNOWN,
+            },
+        ] {
+            assert_eq!(decode_one::<HostStatus>(&frame_of(&status)), status);
+        }
+    }
+
+    #[test]
+    fn an_undefined_head_state_is_refused() {
+        let mut bytes = frame_of(&HostStatus::default());
+        bytes[HEADER_LEN] = 9;
+        let crc = crc32fast::hash(&bytes[2..bytes.len() - CRC_LEN]);
+        let n = bytes.len();
+        bytes[n - CRC_LEN..].copy_from_slice(&crc.to_le_bytes());
+        let mut d = FrameDecoder::new();
+        d.push(&bytes);
+        let f = d.next_frame().unwrap();
+        assert_eq!(HostStatus::decode(&f), Err(Error::BadValue));
+    }
+
     #[test]
     fn an_undefined_servo_mode_is_refused() {
         let mut bytes = frame_of(&sample_command());

@@ -225,6 +225,25 @@ impl<T: Read + Write> BridgeIo<T> {
         Ok(state)
     }
 
+    /// Whether the bridge's shutdown button was held, from the last state frame. Stays set until
+    /// [`Self::send_host_status`] reports the compute module shutting down.
+    pub fn shutdown_requested(&self) -> bool {
+        self.last_state
+            .is_some_and(|s| s.flags & proto::state_flags::SHUTDOWN_REQUESTED != 0)
+    }
+
+    /// Tells the bridge what the compute module is doing and how hot it is, for its display.
+    pub fn send_host_status(
+        &mut self,
+        state: proto::HeadState,
+        cpu_temp_c: Option<f64>,
+    ) -> Result<()> {
+        let cpu_temp_dc = cpu_temp_c.map_or(proto::TEMP_UNKNOWN, |t| {
+            (t * 10.0).round().clamp(-3276.7, 3276.7) as i16
+        });
+        self.send(&proto::HostStatus { state, cpu_temp_dc })
+    }
+
     /// Fills every servo from the current targets, gains and torque state and sends it.
     fn send_command(&mut self) -> Result<()> {
         self.command.seq = self.command.seq.wrapping_add(1);
