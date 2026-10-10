@@ -72,6 +72,7 @@ SYNC 0xD5 0x6B · version (1) · kind (1) · payload length (2, LE) · payload �
 | `Command` 0x01 | compute → bridge | none | every tick, after the policy |
 | `StateRequest` 0x02 | compute → bridge | `State` 0x81 | every tick, at the start |
 | `InfoRequest` 0x03 | compute → bridge | `Info` 0x83 | at open |
+| `HostStatus` 0x04 | compute → bridge | none | once a second, and at once when its state changes |
 
 **Servo slots are servo IDs.** Every J288's ID is its joint's index (`dukki`'s `motor-setup.md`),
 so slot `j` of a command or state is joint `j` of `JOINT_NAMES`. The bridge does not know which
@@ -99,7 +100,8 @@ position across one.
   (so the compute module sees when a command landed); the request's timestamp echoed (so a reply
   that arrives after its wait gave up is recognised and skipped, never taken as the next tick's);
   the bridge's clock; how long ago the last command arrived.
-- **Flags:** `COMMANDED` (a command has arrived since the bridge started) and `WATCHDOG` (§5).
+- **Flags:** `COMMANDED` (a command has arrived since the bridge started), `WATCHDOG` (§5) and
+  `SHUTDOWN_REQUESTED` (the bridge's shutdown button was held, below).
 - **Per servo:** the segment it answered on, or absent; position; the servo's own filtered speed;
   a velocity the bridge computes from position differences over about 15 ms of polls (the one the
   policy gets, `dukki` hardware.md §5.1.1); torque; housing and winding temperature; supply
@@ -117,6 +119,24 @@ position across one.
 
 Protocol version, firmware version, system clock, link baud, watchdog period, and the segment
 each servo ID was found on.
+
+### `HostStatus` (13 bytes framed) and the shutdown button
+
+The compute module's state, `Running` or `ShuttingDown`, and its hottest thermal zone in 0.1 °C
+(`TEMP_UNKNOWN` when unread), for the bridge's status display. Not answered.
+
+The bridge has a shutdown button (`dukki` hardware.md §5.8). Held for 3 s, it sets
+`SHUTDOWN_REQUESTED` in every `State` until a `HostStatus` reports `ShuttingDown`, which is the
+acknowledgement; a request nobody acknowledges lapses after 10 s, so a press while robotd is not
+running cannot shut the head down when it next starts. The compute module is to answer it with
+robotd's own shutdown, sitting the robot down before `systemctl poweroff`, as for the pad's
+held Select. robotd does not act on it yet; `examples/bridge_probe` stands in for it on the bench.
+
+The bridge cannot see the compute module halt. Once a `HostStatus` has said `ShuttingDown` and
+commands have then stopped for 20 s, it shows the head as off and safe to cut power.
+
+Both arrived without a version bump: no existing layout changed, older bridge firmware counts a
+`HostStatus` as a bad message and carries on, and older compute-side software ignores the flag.
 
 ## 5. The watchdog
 
@@ -148,12 +168,14 @@ Per tick: a state request (18 bytes) and command (367) one way, a state (628) th
 | bridge → compute | 3.1 ms of 20 ms | 3.1 ms of 10 ms |
 | state round trip | about 3.5 ms | about 3.5 ms |
 
-The link is full duplex, so the two directions do not add. 100 Hz uses about a third of each
+`HostStatus` adds 13 bytes a second, nothing at either rate. The link is full duplex, so the two
+directions do not add. 100 Hz uses about a third of each
 direction's time; 4 Mbps halves every figure. `BridgeIo` waits 8 ms for a state before failing the
 read.
 
 ## 7. What is not here yet
 
 - Joint zeros and directions (`dukki` hardware.md §12).
+- robotd's side of the shutdown button: acting on `SHUTDOWN_REQUESTED` and sending `HostStatus`.
 - The bridge's own pack-voltage ADC on PA0; the field is in the frame.
 - Reflashing the bridge from the compute module over this same link (`dukki` hardware.md §5.5).
