@@ -466,6 +466,36 @@ divergence: the prototype tracks the standing action scale by saving and restori
 `action_scale` across transitions, which can leave a stale value behind after a sit→stand cycle
 until the next walk; here scale and gain are recomputed from the active state every tick.
 
+**One move at a time, and none from the seat.** A ground pick, a skill, a sit or a rise is
+refused while any other is in flight — including the glide down into the seat — and only
+standing up is accepted from a seated robot. The one request a running skill takes is one for
+itself when it chains, which is the button being held. This is a second divergence: the
+prototype let a pick preempt a kick's tail and a roulade roll out of a kick or the seat, each a
+network handed a pose it was not trained from.
+
+The seat survives a deliberate stop and nothing else. Disabling the policy ends the move in
+flight and, on a seated robot, holds the seat where it is rather than sending the standing home
+pose, which a sitting robot can only reach by going over backwards; `robot.init` on a seated
+robot holds it too. A relax or a servo reboot forgets the seat and every move with it, so the
+next bring-up starts from a standing robot's state, as after a boot.
+
+**The robot is looked at twice** (`robotd/src/posture.rs`). When torque comes on, a robot that
+reads seated ramps to the seat — the sitstand policy's own trained SIT keyframe — instead of
+straight-legged to the standing home pose, which pulls it out of the seat and over backwards.
+And once per enable, before the policy takes over, because the ramp is open-loop: a robot that
+started folded can end it standing, sat back on its seat or on its back. That second look is
+taken even over a seat the controller already believes in. A seated verdict then runs the same
+sequence as a rise while the robot drives — the sitstand network holds the seat for its settle
+time, then rises — with its previous action and low-pass seeded from the held seat rather than
+zeroed: rising on the first tick, cold, from a seat the network had not chosen, went visibly
+worse than the same rise mid-session. The verdict comes from the trunk's height above the feet — the
+feet sites through the kinematic model, turned into the world by the IMU — and the trunk's tilt.
+Seated, the sitstand network rises first; standing, lying down (tilt past 45°) or in between,
+the gait takes over as it always has. The check picks how the policy starts, never whether: a
+Start is the person deciding the robot should drive. The
+height is the signal because the joint angles are not: three recorded seats with little in common
+joint by joint all read 15–39 % of standing height.
+
 Policy files come from paths in the params file, defaulting into the release directory — so a
 normal update carries the policy trained against the binary, and a dev points a path at their
 own `.onnx` and iterates without cutting a release.
@@ -550,9 +580,8 @@ a robot lying on its side, and the wrong one for softening a landing: gravity pa
 `fall_gravity_z` held for 200 ms *is* the robot on the floor, and the window worth acting in
 has closed by then.
 
-So `limp_fall` (off by default: the default velstand gait loads no standing network to hand
-back to) runs a second, separate
-detector — `duck_control::fall` — on the rate rather than the position. Projected gravity
+So `limp_fall` (on by default; with the default velstand gait and no standing network, the
+hand-back is to velstand at zero command) runs a second, separate detector — `duck_control::fall` — on the rate rather than the position. Projected gravity
 rotates with the trunk, so `ġ = −ω × g` is exact and comes straight from the gyro in the same
 12-byte IMU block; extrapolating it over ~0.3 s says where gravity is heading. It fires when
 the robot is already tilted (≈26°), still tipping over rather than recovering, and predicted
@@ -576,6 +605,52 @@ on the floor like any other tick.
 The tuning is the feature, and it is asymmetric: a false positive is a fall the robot
 *caused*, which is worse than the stiff landing it was trying to avoid. The defaults sit
 deliberately on the late side.
+
+#### 2.4.2 Being held is a fourth
+
+A policy has no idea its feet have left the floor. Picked up mid-walk, it keeps stepping, and the
+legs thrash in the hand until somebody presses Start — which is also the only way to get a robot
+that will hold still to be carried. `[pickup]` (on by default) notices instead: a small classifier,
+`duck_control::pickup`, reads the last second of what the loop already reads — gyro, projected
+gravity, joint positions and velocities, the target it commanded the tick before — and scores how
+likely it is that a hand is carrying the robot. Over 0.8 for 100 ms pauses the policy; under 0.35
+for 80 ms, once the pause is 300 ms old, hands it back.
+
+Paused is `driving` false (§1.4), like the limp-fall: the controller is not stepped, the targets
+come from the pause, and they reach the motors through `apply` with no exemption. The pause ramps
+from the policy's last target to a **pause pose** over 300 ms at the policy gain, and resuming is
+the ordinary rising edge of `driving`, so the controller is reset on the way back in. The pose is not
+home: home at walking gain is a balanced pose only for a policy that keeps balancing it, and in
+simulation a robot holding it on the floor tips past 40° within a second or two. The pause pose is
+the walking policy's own mean standing stance, which tips far more slowly and is the stance the
+policy expects to wake up in. That is also why resuming is the fast side of the band: a robot set
+down while paused is holding a fixed pose on the floor, and the sooner the policy has it back the
+less often it tips (in simulation, 3 % of set-downs at a 0.18 s median resume, 12 % at 0.30 s).
+
+It watches only the walking and standing networks in walk mode. A skill, a sit, the limp-fall, a
+disable or the shutdown sit owns the robot outright; any of them ends a pause and empties the
+window, and the next verdict waits for a full second of fresh history — the model was only shown
+complete windows, and one padded at startup paused a simulated robot a tenth of a second after
+boot. Roller mode is not watched at all: the model has never seen wheels.
+
+The model is trained entirely in simulation, in `microduck_rl` (`pickup/`, `scripts/pickup_*.py`):
+the deployed velstand walks, stands and falls under the training randomisation while a simulated
+hand — a mocap body welded softly to the trunk or the head — lifts, carries, holds it at any
+orientation including upside down, spins it, shakes it, sets it down and drops it. (The first
+model's hand only gripped the trunk and only passed through large tilts; on the robot it missed a
+duck lifted by the head and resumed when the duck was turned 180°.) The feature layout, the pause pose and the hysteresis timings
+are fixed there, which is why they are constants in `duck_control::pickup` and only the two
+thresholds are params: changing the rest here without retraining is the silent kind of wrong. The
+row carries servo current, but the shipped model drops it before its first layer — in simulation
+it separated held from standing far better than it does on a real robot. On the board the classifier
+costs a few tenths of a millisecond a tick (`cargo run --release -p duck-control --example
+pickup-bench` measures it there, next to a policy inference). The file ships in the release
+(`models/pickup_detector.onnx`), because its input is this loop's own layout and a model from
+another release is the wrong shape in a way no load check sees.
+
+Off means off: no model is opened and nothing is scored or recorded. A model that will not load is
+a warning rather than unhealthy, and a detector that errors mid-run lets go of any pause and starts
+over — it must never be what strands a robot paused.
 
 A spent pack is the other thing that moves the robot without being asked: with
 `safety.battery_empty_shutdown` (on by default), reaching the empty floor on the smoothed

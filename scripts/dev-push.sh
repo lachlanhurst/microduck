@@ -354,6 +354,8 @@ cp "$BIN"/pet-features staged/
 # The head ToF daemon. Its unit is packaged below; a board with no sensor
 # fitted runs it anyway and says so, which is cheaper than a special case.
 cp "$BIN"/tofd staged/
+# The NFC reader daemon, the same way: a board with no reader runs it, and it says so.
+cp "$BIN"/nfcd staged/
 
 # No `--base-url`: the manifest `LocalDir` reads names the artifact by bare filename, and
 # `package` leaves it bare when no base is given.
@@ -394,11 +396,14 @@ cargo run -p xtask -- package \
     --include "mediad/systemd/sysusers.d/mediad.conf=systemd/sysusers.d/mediad.conf" \
     --include "tof/systemd/tofd.service=systemd/tofd.service" \
     --include "tof/systemd/sysusers.d/tofd.conf=systemd/sysusers.d/tofd.conf" \
+    --include "nfc/systemd/nfcd.service=systemd/nfcd.service" \
+    --include "nfc/systemd/sysusers.d/nfcd.conf=systemd/sysusers.d/nfcd.conf" \
     --include "deploy/journald.conf.d/10-robot.conf=deploy/journald.conf.d/10-robot.conf" \
     --include "docs/design/architecture.md=docs/architecture.md" \
     --include "docs/design/updater-design.md=docs/updater-design.md" \
     --include "deploy/README.md=docs/deploy.md" \
-    --include "pet-detect/models/pet_detect.onnx=models/pet_detect.onnx"
+    --include "pet-detect/models/pet_detect.onnx=models/pet_detect.onnx" \
+    --include "duck-control/models/pickup_detector.onnx=models/pickup_detector.onnx"
 
 
 echo "==> signing with $KEY"
@@ -499,7 +504,7 @@ echo "    current -> $want"
 # no socket at all, so for that one it is the only answer available.
 deadline=$(($(date +%s) + 30))
 stale=""
-for svc in robotd configd padd updaterd btd mediad tofd; do
+for svc in robotd configd padd updaterd btd mediad tofd nfcd; do
     while :; do
         if [ ! -f "/run/${svc}/identity.json" ]; then
             state="silent"
