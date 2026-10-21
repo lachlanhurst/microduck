@@ -16,6 +16,13 @@
 //! answers (about every 4 ms) to see the servo's replies; it replies about every 2 ms, so the
 //! response lies between the last reply seen without it and the first one with it, and both are
 //! reported. Torque responds first, the position a little later.
+//!
+//! Those bounds follow the polling, which is tied to the tick: a poll sent right after the
+//! command queues behind it on the link and tends to see nothing yet, and the next comes a
+//! round trip later. So after each step the polling starts a random 0 to 4 ms late, and every
+//! reply seen counts as a sample of whether the servo had responded that long after its sample.
+//! The share that had, by 0.5 ms bins, is the delay's distribution; its 5, 50 and 95% points
+//! are printed.
 
 use std::fs::File;
 use std::io::Write as _;
@@ -33,6 +40,12 @@ const SETTLE_TICKS: u64 = 50;
 const WATCH: Duration = Duration::from_millis(100);
 /// Leave this much of each tick free so the next state request starts on time.
 const POLL_MARGIN: Duration = Duration::from_micros(4500);
+/// Polling after a step starts up to this much late (see the module notes).
+const POLL_JITTER_US: u64 = 4000;
+/// Bins for the delay's distribution.
+const BIN_US: i64 = 500;
+const BINS: usize = 80;
+
 /// A response is a change of this share of `kp * step` in torque, or of `step` in position.
 const TORQUE_SHARE: f32 = 0.5;
 const MOTION_SHARE: f32 = 0.1;
@@ -72,6 +85,8 @@ struct Event {
     position_before: f32,
     started: Instant,
     last_reply: u16,
+    /// Every reply seen after the step: µs since the sample, and whether torque had responded.
+    seen: Vec<(i64, bool)>,
     last_quiet_torque_us: u64,
     last_quiet_motion_us: u64,
     receipt_us: Option<u64>,
@@ -95,8 +110,10 @@ impl Event {
         }
         self.last_reply = v.replies;
         let at = reply_us(s, self.servo);
+        let responded = (v.torque - self.torque_before).abs() > TORQUE_SHARE * kp * step;
+        self.seen.push((self.since_sample(at), responded || self.torque.is_some()));
         if self.torque.is_none() {
-            if (v.torque - self.torque_before).abs() > TORQUE_SHARE * kp * step {
+            if responded {
                 self.torque = Some((self.last_quiet_torque_us, at));
             } else {
                 self.last_quiet_torque_us = at;
@@ -246,6 +263,7 @@ fn main() {
                 position_before: v.position,
                 started: Instant::now(),
                 last_reply: v.replies,
+                seen: Vec::new(),
                 last_quiet_torque_us: reply_us(&state, j),
                 last_quiet_motion_us: reply_us(&state, j),
                 receipt_us: None,
@@ -255,6 +273,9 @@ fn main() {
         }
 
         next += period;
+        if stepped.is_some() {
+            std::thread::sleep(Duration::from_micros(rng.range(0, POLL_JITTER_US)));
+        }
         // Watch the step between ticks.
         while let Some(e) = active.as_mut() {
             if e.done() || e.started.elapsed() > WATCH {
@@ -320,6 +341,34 @@ fn main() {
     percentiles("torque response, earliest", col(&|e| e.torque.map(|t| e.since_sample(t.0))));
     percentiles("torque response, latest", col(&|e| e.torque.map(|t| e.since_sample(t.1))));
     percentiles("position response, latest", col(&|e| e.motion.map(|t| e.since_sample(t.1))));
+    // The delay's distribution from every reply seen: the share responded by bin.
+    let mut yes = [0u32; BINS];
+    let mut all = [0u32; BINS];
+    for (t, responded) in finished.iter().flat_map(|e| e.seen.iter()) {
+        let b = (t / BIN_US).clamp(0, BINS as i64 - 1) as usize;
+        all[b] += 1;
+        yes[b] += *responded as u32;
+    }
+    let share: Vec<(f64, f64)> = (0..BINS)
+        .filter(|&b| all[b] > 0)
+        .map(|b| ((b as f64 + 0.5) * BIN_US as f64 / 1e3, yes[b] as f64 / all[b] as f64))
+        .collect();
+    let crossing = |q: f64| share.iter().find(|(_, f)| *f >= q).map(|(t, _)| *t);
+    let fmt = |v: Option<f64>| v.map_or("-".into(), |t| format!("{t:.2}"));
+    println!(
+        "  torque response, from every reply   5% {} ms  50% {} ms  95% {} ms  ({} replies, {:.1} ms bins)",
+        fmt(crossing(0.05)),
+        fmt(crossing(0.5)),
+        fmt(crossing(0.95)),
+        all.iter().sum::<u32>(),
+        BIN_US as f64 / 1e3
+    );
+    let bins: Vec<String> = share
+        .iter()
+        .filter(|(_, f)| *f > 0.0 && *f < 1.0)
+        .map(|(t, f)| format!("{t:.2}:{:.0}%", f * 100.0))
+        .collect();
+    println!("  share responded by bin (ms:share)   {}", bins.join(" "));
     println!("On the head:");
     percentiles("state round trip", col(&|e| Some(e.rtt_us as i64)));
     percentiles("state received to command sent", col(&|e| Some(e.host_us as i64)));
