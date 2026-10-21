@@ -130,6 +130,11 @@ impl<T: Read + Write> BridgeIo<T> {
         self.last_state.as_ref()
     }
 
+    /// The sequence number of the last command sent, as [`proto::State::command_seq`] echoes it.
+    pub fn command_seq(&self) -> u32 {
+        self.command.seq
+    }
+
     fn host_us(&self) -> u64 {
         self.epoch.elapsed().as_micros() as u64
     }
