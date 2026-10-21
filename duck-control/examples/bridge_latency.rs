@@ -2,8 +2,12 @@
 //! command lag stands in for: from the moment a servo was sampled for the state a tick reads, to
 //! the first reply in which that servo acts on the command the tick then sent.
 //!
-//!   bridge_latency [port] [kp] [step_rad] [events_per_servo] [compute_ms] [csv]
-//!   bridge_latency /dev/ttyS7 1.0 0.3 10 0 /root/bridge_latency.csv
+//!   bridge_latency [port] [kp] [step_rad] [events_per_servo] [compute_ms] [csv] [move_rad]
+//!   bridge_latency /dev/ttyS7 1.0 0.3 10 0 /root/bridge_latency.csv 0.3
+//!
+//! With `move_rad` above 0, every servo but the one being stepped follows its own sine of that
+//! amplitude at [`MOVE_HZ`], from a random phase, as a robot's joints all move at once; the
+//! stepped servo holds, so its torque change stays clean to detect.
 //!
 //! Every servo holds where it is at `kp` and kd 0.05, ticking at 50 Hz as robotd does: a sample
 //! request, `compute_ms` standing in for inference, then the targets. At a random tick every
@@ -33,6 +37,8 @@ use duck_control::bridge::{BridgeConfig, BridgeIo};
 use duck_control::{JointTargets, NUM_JOINTS, RobotIo};
 
 const HZ: f64 = 50.0;
+/// The other servos' motion with `move_rad`: about a gait's frequency.
+const MOVE_HZ: f64 = 1.5;
 const KD: f64 = 0.05;
 /// Ticks before the first step, for the hold to settle.
 const SETTLE_TICKS: u64 = 50;
@@ -165,8 +171,10 @@ fn main() {
     let compute = Duration::from_secs_f64(
         args.next().map_or(0.0, |a| a.parse::<f64>().expect("compute_ms")) / 1e3,
     );
-    let csv_path = args.next();
+    let csv_path = args.next().filter(|p| !p.is_empty() && p != "-");
+    let move_rad: f64 = args.next().map_or(0.0, |a| a.parse().expect("move_rad"));
     assert!(step.abs() <= 0.5, "keep the step at 0.5 rad or less");
+    assert!(move_rad.abs() <= 0.5, "keep the motion at 0.5 rad or less");
 
     let config = BridgeConfig {
         kp_per_gain: 0.01,
@@ -182,7 +190,7 @@ fn main() {
         .filter(|&j| segments[j] != proto::ABSENT)
         .collect();
     println!(
-        "bridge {}: {} servos, kp {kp} kd {KD}, step {step} rad, {per_servo} steps each, compute {:.1} ms",
+        "bridge {}: {} servos, kp {kp} kd {KD}, step {step} rad, {per_servo} steps each, compute {:.1} ms, others moving {move_rad} rad at {MOVE_HZ} Hz",
         io.info().firmware_str(),
         servos.len(),
         compute.as_secs_f64() * 1e3
@@ -210,11 +218,18 @@ fn main() {
             | 1,
     );
 
+    let phases: Vec<f64> = (0..NUM_JOINTS)
+        .map(|_| rng.range(0, 6283) as f64 / 1000.0)
+        .collect();
+    // The servo whose steps are being timed, which holds rather than moving.
+    let mut stepping: Option<usize> = None;
+    let begin = Instant::now();
+
     let period = Duration::from_secs_f64(1.0 / HZ);
     let mut next = Instant::now();
     let mut tick: u64 = 0;
     let mut due = SETTLE_TICKS;
-    let mut planned = plan.into_iter();
+    let mut planned = plan.into_iter().peekable();
     let mut active: Option<Event> = None;
     let mut finished: Vec<Event> = Vec::new();
     let mut missed_states = 0u64;
@@ -239,6 +254,15 @@ fn main() {
         std::thread::sleep(compute);
 
         let mut stepped = None;
+        // The next servo to be timed stops moving and settles at home before its first step.
+        if let Some(&(j, _)) = planned.peek()
+            && active.is_none()
+            && stepping != Some(j)
+        {
+            stepping = Some(j);
+            targets[j] = home[j];
+            due = due.max(tick + 25);
+        }
         if active.is_none() && tick >= due {
             match planned.next() {
                 Some((j, out)) => {
@@ -247,6 +271,15 @@ fn main() {
                     due = tick + rng.range(25, 50);
                 }
                 None => out_of_plan = true,
+            }
+        }
+        if move_rad != 0.0 {
+            let t = begin.elapsed().as_secs_f64();
+            for &k in &servos {
+                if Some(k) != stepping {
+                    targets[k] = home[k]
+                        + move_rad * (2.0 * std::f64::consts::PI * MOVE_HZ * t + phases[k]).sin();
+                }
             }
         }
         io.write(&JointTargets::new(targets)).expect("command");
