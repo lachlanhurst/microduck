@@ -5,15 +5,15 @@
 //!   bridge_latency [port] [kp] [step_rad] [events_per_servo] [compute_ms] [csv]
 //!   bridge_latency /dev/ttyS7 1.0 0.3 10 0 /root/bridge_latency.csv
 //!
-//! Every servo holds where it is at `kp` and kd 0.05, ticking at 50 Hz as robotd does: a state
-//! request, `compute_ms` standing in for inference, then the command. At a random tick every
+//! Every servo holds where it is at `kp` and kd 0.05, ticking at 50 Hz as robotd does: a sample
+//! request, `compute_ms` standing in for inference, then the targets. At a random tick every
 //! half to one second, one servo's target toggles by `step_rad` (out, then back the next time),
 //! servo after servo. The joints move, so they must be free to.
 //!
 //! Times are on the bridge's clock, so no clock sync is needed: a servo's sample time is the
-//! state frame's `bridge_time_us` less that servo's `age_us`, and the command's arrival is
-//! `bridge_time_us` less `command_age_us`. Between ticks the state is polled as fast as the link
-//! answers (about every 4 ms) to see the servo's replies; it replies about every 2 ms, so the
+//! sample's `bridge_time_us` less that servo's `age_us`, and the command's arrival is a state
+//! frame's `bridge_time_us` less `command_age_us`. Between ticks the full state is polled as fast
+//! as the link answers (about every 4 ms) to see the servo's replies; it replies about every 2 ms, so the
 //! response lies between the last reply seen without it and the first one with it, and both are
 //! reported. Torque responds first, the position a little later.
 //!
@@ -71,6 +71,11 @@ fn reply_us(state: &proto::State, j: usize) -> u64 {
     state.bridge_time_us - state.servos[j].age_us as u64
 }
 
+/// The same for a sample.
+fn sampled_us(sample: &proto::Sample, j: usize) -> u64 {
+    sample.bridge_time_us - sample.servos[j].age_us as u64
+}
+
 /// One step being watched.
 struct Event {
     servo: usize,
@@ -84,7 +89,8 @@ struct Event {
     torque_before: f32,
     position_before: f32,
     started: Instant,
-    last_reply: u16,
+    /// The reply counter of the last state frame seen, to count each reply once.
+    last_reply: Option<u16>,
     /// Every reply seen after the step: µs since the sample, and whether torque had responded.
     seen: Vec<(i64, bool)>,
     last_quiet_torque_us: u64,
@@ -105,10 +111,10 @@ impl Event {
             self.receipt_us = Some(s.bridge_time_us - s.command_age_us as u64);
         }
         let v = &s.servos[self.servo];
-        if v.replies == self.last_reply {
+        if self.last_reply == Some(v.replies) {
             return;
         }
-        self.last_reply = v.replies;
+        self.last_reply = Some(v.replies);
         let at = reply_us(s, self.servo);
         let responded = (v.torque - self.torque_before).abs() > TORQUE_SHARE * kp * step;
         self.seen.push((self.since_sample(at), responded || self.torque.is_some()));
@@ -220,7 +226,7 @@ fn main() {
         if t0 > next + period / 4 {
             late_ticks += 1;
         }
-        let state = match io.state() {
+        let sample = match io.sample() {
             Ok(s) => s,
             Err(_) => {
                 missed_states += 1;
@@ -230,9 +236,6 @@ fn main() {
         };
         let rtt = t0.elapsed();
         let t_rx = Instant::now();
-        if let Some(e) = active.as_mut() {
-            e.see(&state, kp as f32, step as f32);
-        }
         std::thread::sleep(compute);
 
         let mut stepped = None;
@@ -249,7 +252,7 @@ fn main() {
         io.write(&JointTargets::new(targets)).expect("command");
         let sent_seq = io.command_seq();
         if let Some((j, out)) = stepped {
-            let v = &state.servos[j];
+            let v = &sample.servos[j];
             active = Some(Event {
                 servo: j,
                 segment: segments[j],
@@ -258,14 +261,14 @@ fn main() {
                 rtt_us: rtt.as_micros() as u64,
                 host_us: t_rx.elapsed().as_micros() as u64,
                 state_age_us: v.age_us as u64,
-                sample_us: reply_us(&state, j),
+                sample_us: sampled_us(&sample, j),
                 torque_before: v.torque,
                 position_before: v.position,
                 started: Instant::now(),
-                last_reply: v.replies,
+                last_reply: None,
                 seen: Vec::new(),
-                last_quiet_torque_us: reply_us(&state, j),
-                last_quiet_motion_us: reply_us(&state, j),
+                last_quiet_torque_us: sampled_us(&sample, j),
+                last_quiet_motion_us: sampled_us(&sample, j),
                 receipt_us: None,
                 torque: None,
                 motion: None,
@@ -336,7 +339,7 @@ fn main() {
         late_ticks
     );
     println!("From the servo's sample in the state a tick read:");
-    percentiles("state frame built (servo age)", col(&|e| Some(e.state_age_us as i64)));
+    percentiles("sample built (servo age)", col(&|e| Some(e.state_age_us as i64)));
     percentiles("command reached the bridge", col(&|e| e.receipt_us.map(|t| e.since_sample(t))));
     percentiles("torque response, earliest", col(&|e| e.torque.map(|t| e.since_sample(t.0))));
     percentiles("torque response, latest", col(&|e| e.torque.map(|t| e.since_sample(t.1))));
@@ -370,8 +373,8 @@ fn main() {
         .collect();
     println!("  share responded by bin (ms:share)   {}", bins.join(" "));
     println!("On the head:");
-    percentiles("state round trip", col(&|e| Some(e.rtt_us as i64)));
-    percentiles("state received to command sent", col(&|e| Some(e.host_us as i64)));
+    percentiles("sample round trip", col(&|e| Some(e.rtt_us as i64)));
+    percentiles("sample received to targets sent", col(&|e| Some(e.host_us as i64)));
     println!("Torque response, latest, by segment:");
     for seg in 0..4u8 {
         let v = col(&|e| (e.segment == seg).then_some(e.torque.map(|t| e.since_sample(t.1))).flatten());

@@ -2,9 +2,12 @@
 //! STM32G474, over `duck-bridge-proto`.
 //!
 //! `docs/design/bridge-protocol.md` owns the protocol. In short: the bridge polls the servos on
-//! its own schedule and holds the latest state, so a [`RobotIo::read`] is one small request and
-//! one state frame, answered without waiting on a servo; a [`RobotIo::write`] is one command frame
-//! with no reply. The control rate is therefore this side's choice alone.
+//! its own schedule, so a [`RobotIo::read`] is one small request and one [`proto::Sample`],
+//! answered after a fresh pass over the servos; a [`RobotIo::write`] is one [`proto::Targets`]
+//! frame with no reply, or a full [`proto::Command`] when a mode, gain or action changed and about
+//! once a second. The full [`proto::State`], with temperatures and diagnostics, is asked for about
+//! once a second after a write, so it never sits in a read. The control rate is this side's
+//! choice alone.
 //!
 //! Each J288's ID is its joint's index (`motor-setup.md`), so servo slot `j` in the protocol is
 //! joint `j` in [`crate::model::JOINT_NAMES`]. Positions pass through unchanged: they are the
@@ -24,10 +27,14 @@ use crate::model::{JOINT_IDS, NUM_JOINTS};
 /// neck harness.
 pub const DEFAULT_BAUD: u32 = 2_000_000;
 
-/// A state frame is 628 bytes, 3.1 ms at 2 Mbps; the bridge answers from memory, so the rest is
-/// scheduling on either side. Short enough to leave a 100 Hz tick most of its budget when the
-/// bridge does not answer.
+/// A sample takes a pass over the servos (under 1 ms) and 1.1 ms on the wire at 2 Mbps; a full
+/// state frame 3.1 ms, answered from memory. Short enough to leave a 100 Hz tick most of its
+/// budget when the bridge does not answer.
 const REPLY_TIMEOUT: Duration = Duration::from_millis(8);
+/// How often a full command goes out even when only targets changed, so a lost one is repaired.
+const FULL_COMMAND_EVERY: Duration = Duration::from_secs(1);
+/// How often a write also asks for a full state frame, for the slow sensors and diagnostics.
+const FULL_STATE_EVERY: Duration = Duration::from_secs(1);
 /// The info exchange happens once, at open, where a slow answer costs nothing.
 const INFO_TIMEOUT: Duration = Duration::from_millis(250);
 /// Granularity of the blocking reads inside a reply wait.
@@ -75,7 +82,15 @@ pub struct BridgeIo<T> {
     /// set: that would drive every joint to position zero.
     targets_set: bool,
     kp: f64,
+    /// The last full command sent and when, to know when targets alone will do.
+    last_full: Option<(proto::Command, Instant)>,
+    /// When the next write also asks for a full state frame.
+    state_due: Instant,
     last_state: Option<proto::State>,
+    last_sample: Option<proto::Sample>,
+    /// State flags and IMU status from the newest sample or state frame, whichever came last.
+    flags: u16,
+    imu_status: u8,
     imu: SflpDecoder,
     stale_imu: ImuStale,
     last_rotation_samples: Option<u32>,
@@ -111,7 +126,12 @@ impl<T: Read + Write> BridgeIo<T> {
             torque_on: false,
             targets_set: false,
             kp: 0.0,
+            last_full: None,
+            state_due: Instant::now(),
             last_state: None,
+            last_sample: None,
+            flags: 0,
+            imu_status: proto::imu_status::STARTING,
             imu: SflpDecoder::default(),
             stale_imu: ImuStale::default(),
             last_rotation_samples: None,
@@ -125,9 +145,15 @@ impl<T: Read + Write> BridgeIo<T> {
         &self.info
     }
 
-    /// The last state frame, with everything the bridge reports and [`Sensors`] has no room for.
+    /// The last full state frame, with everything the bridge reports and [`Sensors`] has no room
+    /// for. About a second old at most once writes are going.
     pub fn last_state(&self) -> Option<&proto::State> {
         self.last_state.as_ref()
+    }
+
+    /// The last sample, what the last read was made from.
+    pub fn last_sample(&self) -> Option<&proto::Sample> {
+        self.last_sample.as_ref()
     }
 
     /// The sequence number of the last command sent, as [`proto::State::command_seq`] echoes it.
@@ -148,13 +174,22 @@ impl<T: Read + Write> BridgeIo<T> {
             .map_err(|e| IoError::Bus(format!("bridge write: {e}")))
     }
 
-    /// Reads until a frame of `M`'s kind that `accept` takes arrives, or `timeout` passes.
-    /// Frames of other kinds, and ones `accept` refuses, are dropped.
+    /// Reads until a frame of `M`'s kind that `accept` takes arrives, or `timeout` passes. A full
+    /// state frame met on the way, the answer to a request a write made, is kept; other frames,
+    /// and ones `accept` refuses, are dropped.
     fn receive<M: Message>(&mut self, timeout: Duration, accept: impl Fn(&M) -> bool) -> Result<M> {
         let deadline = Instant::now() + timeout;
         let mut chunk = [0u8; 1024];
         loop {
             while let Some(frame) = self.decoder.next_frame() {
+                if frame.kind == proto::Kind::State && M::KIND != proto::Kind::State {
+                    if let Ok(state) = proto::State::decode(&frame) {
+                        self.flags = state.flags;
+                        self.imu_status = state.imu.status;
+                        self.last_state = Some(state);
+                    }
+                    continue;
+                }
                 if frame.kind == M::KIND {
                     let message = M::decode(&frame)
                         .map_err(|e| IoError::Bus(format!("bridge {:?} frame: {e:?}", M::KIND)))?;
@@ -226,15 +261,29 @@ impl<T: Read + Write> BridgeIo<T> {
         self.send(&proto::StateRequest { host_time_us })?;
         let state = self
             .receive::<proto::State>(REPLY_TIMEOUT, |s| s.request_host_time_us == host_time_us)?;
+        self.flags = state.flags;
+        self.imu_status = state.imu.status;
         self.last_state = Some(state);
         Ok(state)
+    }
+
+    /// One sample request and its answer, after a fresh pass over the servos. A late answer to
+    /// an earlier request is skipped, as for [`Self::state`].
+    pub fn sample(&mut self) -> Result<proto::Sample> {
+        let host_time_us = self.host_us();
+        self.send(&proto::SampleRequest { host_time_us })?;
+        let sample = self
+            .receive::<proto::Sample>(REPLY_TIMEOUT, |s| s.request_host_time_us == host_time_us)?;
+        self.flags = sample.flags;
+        self.imu_status = sample.imu.status;
+        self.last_sample = Some(sample);
+        Ok(sample)
     }
 
     /// Whether the bridge's shutdown button was held, from the last state frame. Stays set until
     /// [`Self::send_host_status`] reports the compute module shutting down.
     pub fn shutdown_requested(&self) -> bool {
-        self.last_state
-            .is_some_and(|s| s.flags & proto::state_flags::SHUTDOWN_REQUESTED != 0)
+        self.flags & proto::state_flags::SHUTDOWN_REQUESTED != 0
     }
 
     /// Tells the bridge what the compute module is doing and how hot it is, for its display.
@@ -249,10 +298,8 @@ impl<T: Read + Write> BridgeIo<T> {
         self.send(&proto::HostStatus { state, cpu_temp_dc })
     }
 
-    /// Fills every servo from the current targets, gains and torque state and sends it.
-    fn send_command(&mut self) -> Result<()> {
-        self.command.seq = self.command.seq.wrapping_add(1);
-        self.command.host_time_us = self.host_us();
+    /// Fills every servo from the current gains and torque state.
+    fn fill_command(&mut self) {
         let drive = self.torque_on && self.targets_set;
         for s in &mut self.command.servos {
             s.mode = if drive {
@@ -265,8 +312,45 @@ impl<T: Read + Write> BridgeIo<T> {
             s.velocity = 0.0;
             s.torque = 0.0;
         }
+    }
+
+    /// Sends the full command: targets, modes, gains and actions.
+    fn send_command(&mut self) -> Result<()> {
+        self.fill_command();
+        self.command.seq = self.command.seq.wrapping_add(1);
+        self.command.host_time_us = self.host_us();
         let command = self.command;
-        self.send(&command)
+        self.send(&command)?;
+        self.last_full = Some((command, Instant::now()));
+        Ok(())
+    }
+
+    /// Whether everything but the positions still matches the last full command, recently
+    /// enough that targets alone will do.
+    fn targets_suffice(&mut self) -> bool {
+        self.fill_command();
+        let Some((sent, at)) = &self.last_full else {
+            return false;
+        };
+        let rest = |s: &proto::ServoCommand| (s.mode, s.action, s.action_id, s.velocity, s.kp, s.kd, s.torque);
+        at.elapsed() < FULL_COMMAND_EVERY
+            && sent
+                .servos
+                .iter()
+                .zip(&self.command.servos)
+                .all(|(a, b)| rest(a) == rest(b))
+    }
+
+    /// Sends the targets alone; the bridge keeps the rest from the last full command.
+    fn send_targets(&mut self) -> Result<()> {
+        self.command.seq = self.command.seq.wrapping_add(1);
+        self.command.host_time_us = self.host_us();
+        let targets = proto::Targets {
+            seq: self.command.seq,
+            host_time_us: self.command.host_time_us,
+            positions: self.command.servos.map(|s| s.position),
+        };
+        self.send(&targets)
     }
 
     fn set_targets(&mut self, positions: &[f64; NUM_JOINTS]) {
@@ -276,9 +360,9 @@ impl<T: Read + Write> BridgeIo<T> {
         self.targets_set = true;
     }
 
-    /// Present positions from a fresh state frame.
+    /// Present positions from a fresh sample.
     pub fn present_positions(&mut self) -> Result<[f64; NUM_JOINTS]> {
-        Ok(sensors_from(&self.state()?)?.positions)
+        Ok(sensors_from(&self.sample()?)?.positions)
     }
 
     /// Ramp every joint from where it is now to `target`, linearly. The same contract as
@@ -305,9 +389,9 @@ impl<T: Read + Write> BridgeIo<T> {
     }
 }
 
-/// The servos and IMU in [`Sensors`]' shape, or why not.
-fn sensors_from(state: &proto::State) -> Result<Sensors> {
-    let present = state
+/// The servos in [`Sensors`]' shape, or why not. The IMU is the caller's.
+fn sensors_from(sample: &proto::Sample) -> Result<Sensors> {
+    let present = sample
         .servos
         .iter()
         .filter(|s| s.segment != proto::ABSENT)
@@ -320,7 +404,7 @@ fn sensors_from(state: &proto::State) -> Result<Sensors> {
         });
     }
     let mut sensors = Sensors::default();
-    for (j, servo) in state.servos.iter().enumerate() {
+    for (j, servo) in sample.servos.iter().enumerate() {
         if servo.age_us > MAX_SERVO_AGE_US {
             return Err(IoError::Bus(format!(
                 "servo {j} last answered {} µs ago",
@@ -337,12 +421,12 @@ fn sensors_from(state: &proto::State) -> Result<Sensors> {
 
 impl<T: Read + Write> RobotIo for BridgeIo<T> {
     fn read(&mut self) -> Result<Sensors> {
-        let state = self.state()?;
-        let mut sensors = sensors_from(&state)?;
+        let sample = self.sample()?;
+        let mut sensors = sensors_from(&sample)?;
         // Stale by the bridge's own sample counter rather than by comparing bytes: the IMU runs
         // at 120 Hz, so at a 100 Hz tick two identical blocks are rare but not wrong, and the
         // counter says exactly whether a new fused sample arrived.
-        let samples = state.imu.rotation_samples;
+        let samples = sample.imu.rotation_samples;
         if self.last_rotation_samples == Some(samples) {
             self.stale_imu.total += 1;
             self.stale_imu.run += 1;
@@ -350,13 +434,26 @@ impl<T: Read + Write> RobotIo for BridgeIo<T> {
             self.stale_imu.run = 0;
         }
         self.last_rotation_samples = Some(samples);
-        sensors.imu = self.imu.decode(&state.imu.block);
+        sensors.imu = self.imu.decode(&sample.imu.block);
         Ok(sensors)
     }
 
+    /// Targets alone when nothing else changed, the full command otherwise; then, about once a
+    /// second, a full state request, whose answer arrives while the tick has nothing else on
+    /// the link and is kept by the next read.
     fn write(&mut self, targets: &JointTargets) -> Result<()> {
         self.set_targets(&targets.positions);
-        self.send_command()
+        if self.targets_suffice() {
+            self.send_targets()?;
+        } else {
+            self.send_command()?;
+        }
+        if Instant::now() >= self.state_due {
+            self.state_due = Instant::now() + FULL_STATE_EVERY;
+            let host_time_us = self.host_us();
+            self.send(&proto::StateRequest { host_time_us })?;
+        }
+        Ok(())
     }
 
     fn set_gain(&mut self, kp: u16) -> Result<()> {
@@ -390,8 +487,9 @@ impl<T: Read + Write> RobotIo for BridgeIo<T> {
         self.send_command()
     }
 
-    /// From the last state frame, which every tick fetches anyway; a fresh one only if no tick
-    /// has run yet. Voltage is the bridge's ADC once it measures, otherwise the servos' mean.
+    /// From the last full state frame, which writes ask for about once a second; a fresh one
+    /// only if none has arrived yet. Voltage is the bridge's ADC once it measures, otherwise the
+    /// servos' mean.
     fn slow_sensors(&mut self) -> Result<SlowSensors> {
         let state = match self.last_state {
             Some(s) => s,
@@ -427,10 +525,7 @@ impl<T: Read + Write> RobotIo for BridgeIo<T> {
     }
 
     fn imu_ready(&self) -> bool {
-        self.imu.ready()
-            && self
-                .last_state
-                .is_some_and(|s| s.imu.status == proto::imu_status::RUNNING)
+        self.imu.ready() && self.imu_status == proto::imu_status::RUNNING
     }
 }
 
@@ -439,14 +534,17 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    /// A bridge that answers like the firmware: info on request, a state echoing the request's
-    /// time, and it records every command. Servo positions follow the last FOC command, as a
-    /// servo that tracks perfectly would.
+    /// A bridge that answers like the firmware: info on request, a state or a sample echoing the
+    /// request's time, and it records every command, merging targets into the last full one as
+    /// the firmware does. Servo positions follow the last FOC command, as a servo that tracks
+    /// perfectly would.
     struct FakeBridge {
         rx: FrameDecoder,
         tx: VecDeque<u8>,
         state: proto::State,
         commands: Vec<proto::Command>,
+        /// How many of `commands` came as targets alone.
+        targets: usize,
         /// Answers queued ahead of the next reply, to model a late one.
         inject: Vec<u8>,
     }
@@ -469,8 +567,41 @@ mod tests {
                 tx: VecDeque::new(),
                 state,
                 commands: Vec::new(),
+                targets: 0,
                 inject: Vec::new(),
             }
+        }
+
+        /// The sample the firmware would build from `state`.
+        fn sample(&self, request_host_time_us: u64) -> proto::Sample {
+            let s = &self.state;
+            proto::Sample {
+                request_host_time_us,
+                flags: s.flags,
+                servos: s.servos.map(|v| proto::ServoSample {
+                    segment: v.segment,
+                    position: v.position,
+                    velocity: v.velocity,
+                    torque: v.torque,
+                    age_us: v.age_us,
+                }),
+                imu: proto::ImuSample {
+                    status: s.imu.status,
+                    block: s.imu.block,
+                    age_us: s.imu.age_us,
+                    rotation_samples: s.imu.rotation_samples,
+                },
+                ..Default::default()
+            }
+        }
+
+        fn apply(&mut self, c: proto::Command) {
+            for (servo, cmd) in self.state.servos.iter_mut().zip(&c.servos) {
+                if cmd.mode == ServoMode::Foc {
+                    servo.position = cmd.position;
+                }
+            }
+            self.commands.push(c);
         }
 
         fn reply<M: Message>(&mut self, m: &M) {
@@ -486,7 +617,9 @@ mod tests {
             enum Request {
                 Info,
                 State(proto::StateRequest),
+                Sample(proto::SampleRequest),
                 Command(Box<proto::Command>),
+                Targets(proto::Targets),
             }
             self.rx.push(data);
             loop {
@@ -497,8 +630,14 @@ mod tests {
                         proto::Kind::StateRequest => {
                             Request::State(proto::StateRequest::decode(&frame).unwrap())
                         }
+                        proto::Kind::SampleRequest => {
+                            Request::Sample(proto::SampleRequest::decode(&frame).unwrap())
+                        }
                         proto::Kind::Command => {
                             Request::Command(Box::new(proto::Command::decode(&frame).unwrap()))
+                        }
+                        proto::Kind::Targets => {
+                            Request::Targets(proto::Targets::decode(&frame).unwrap())
                         }
                         _ => continue,
                     },
@@ -516,13 +655,20 @@ mod tests {
                         s.request_host_time_us = req.host_time_us;
                         self.reply(&s);
                     }
-                    Request::Command(c) => {
-                        for (servo, cmd) in self.state.servos.iter_mut().zip(&c.servos) {
-                            if cmd.mode == ServoMode::Foc {
-                                servo.position = cmd.position;
-                            }
+                    Request::Sample(req) => {
+                        let sample = self.sample(req.host_time_us);
+                        self.reply(&sample);
+                    }
+                    Request::Command(c) => self.apply(*c),
+                    Request::Targets(t) => {
+                        let mut c = self.commands.last().copied().unwrap_or_default();
+                        c.seq = t.seq;
+                        c.host_time_us = t.host_time_us;
+                        for (servo, p) in c.servos.iter_mut().zip(t.positions) {
+                            servo.position = p;
                         }
-                        self.commands.push(*c);
+                        self.targets += 1;
+                        self.apply(c);
                     }
                 }
             }
@@ -648,8 +794,7 @@ mod tests {
     #[test]
     fn a_late_reply_is_not_mistaken_for_the_current_one() {
         let mut io = open();
-        let mut late = io.port.state;
-        late.request_host_time_us = u64::MAX;
+        let mut late = io.port.sample(u64::MAX);
         late.servos[0].position = 99.0;
         let mut buf = [0u8; proto::MAX_FRAME];
         let n = late.encode(&mut buf).unwrap();
@@ -658,7 +803,8 @@ mod tests {
         assert!((s.positions[0] - 0.0).abs() < 1e-6);
     }
 
-    /// Voltage comes from the servos until the bridge's ADC reports, then from the ADC.
+    /// Voltage comes from the servos until the bridge's ADC reports, then from the ADC, read
+    /// from the full state frame a write asks for once a second and the next read keeps.
     #[test]
     fn slow_sensors_prefer_the_adc_once_it_reports() {
         let mut io = open();
@@ -667,7 +813,43 @@ mod tests {
         assert!((slow.volts - 23.5).abs() < 1e-9);
         assert_eq!(slow.temps_c[2], 32.0);
         io.port.state.pack_mv = 24_150;
+        io.state_due = Instant::now();
+        io.write(&JointTargets::new([0.0; NUM_JOINTS])).unwrap();
         io.read().unwrap();
         assert!((io.slow_sensors().unwrap().volts - 24.15).abs() < 1e-9);
+    }
+
+    /// Once a full command has set modes and gains, a write sends targets alone, and a change to
+    /// anything but the positions sends the full command again.
+    #[test]
+    fn writes_send_targets_alone_until_something_else_changes() {
+        let mut io = open();
+        io.set_gain(200).unwrap();
+        io.set_torque(true).unwrap();
+        let full = io.port.commands.len();
+        io.write(&JointTargets::new([0.4; NUM_JOINTS])).unwrap();
+        io.write(&JointTargets::new([0.5; NUM_JOINTS])).unwrap();
+        assert_eq!(io.port.targets, 2);
+        let last = io.port.commands.last().unwrap();
+        assert!(last.servos.iter().all(|s| s.mode == ServoMode::Foc && (s.position - 0.5).abs() < 1e-6));
+        assert!(last.servos.iter().all(|s| (s.kp - 2.0).abs() < 1e-6));
+        io.set_gain(100).unwrap();
+        io.write(&JointTargets::new([0.6; NUM_JOINTS])).unwrap();
+        assert_eq!(io.port.targets, 3, "the gain change went as a full command, then targets");
+        assert_eq!(io.port.commands.len(), full + 4);
+        assert!(io.port.commands.last().unwrap().servos.iter().all(|s| (s.kp - 1.0).abs() < 1e-6));
+    }
+
+    /// The shutdown flag follows the newest frame, so a full state frame from before the
+    /// acknowledgement cannot raise it again after a sample has cleared it.
+    #[test]
+    fn the_shutdown_flag_follows_the_newest_frame() {
+        let mut io = open();
+        io.port.state.flags = proto::state_flags::SHUTDOWN_REQUESTED;
+        io.read().unwrap();
+        assert!(io.shutdown_requested());
+        io.port.state.flags = 0;
+        io.read().unwrap();
+        assert!(!io.shutdown_requested());
     }
 }

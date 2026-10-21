@@ -13,22 +13,32 @@ firmware lives in the `dukki` repository (`src/bridge`). On this side, `duck-con
 
 ## 1. The shape: the bridge runs freely, the compute module asks
 
-The bridge polls every servo on its own schedule, about 450 times a second each, and always holds
-the latest reply from each servo and the latest IMU sample. The compute module, once per control
-tick:
+The bridge polls every servo on its own schedule, about 500 times a second each, serving its
+segments side by side so a pass over all fifteen takes about 0.7 ms, and always holds the latest
+reply from each servo and the latest IMU sample. The compute module, once per control tick:
 
-1. sends a `StateRequest` and gets a `State` back, built from what the bridge already holds — the
-   reply never waits on a servo;
+1. sends a `SampleRequest`; the bridge starts a pass over the servos at once and answers with a
+   `Sample` when a pass that started after the request completes, so the positions in it are
+   under a millisecond old;
 2. runs the policy;
-3. sends a `Command`, which the bridge stores and applies on its next pass over each segment.
+3. sends `Targets`, which the bridge applies on its very next exchange with each servo, mid-pass
+   if one is under way.
 
-The control rate is therefore the compute module's choice alone. `control.hz` can be 50 or 100 —
-or anything the link budget below allows — with no change to the bridge or the protocol. The cost
-is that a state is up to one bridge pass old (about 2 ms) and a command takes up to one pass to
-reach a servo; both are measured and reported in every frame (§4), not guessed.
+The control rate is still the compute module's choice alone. `control.hz` can be 50 or 100 — or
+anything the link budget below allows — with no change to the bridge or the protocol. A full
+`Command` (modes, gains, actions) goes only when one of those changes and about once a second as a
+refresh, and a full `State` (temperatures, faults, counters) is asked for about once a second just
+after a tick's targets, so neither sits between a sample and the policy.
 
-The alternative — one servo round per command, replying when it completes — makes the bridge's
-bus time part of every tick and ties the control rate to the servo count. It was not chosen.
+Protocol 1 answered every tick's `StateRequest` at once from memory, with a 628-byte `State`, and
+sent a 367-byte `Command`. Measured on the bench with `examples/bridge_latency` at kp 1, the time
+from a servo's sample in the frame a tick read to that servo acting on the tick's command was about
+12.75 ms at the median, almost all of it the link and the wait for the bridge's next pass.
+Protocol 2 with the bridge's segments side by side measures 4.75 ms (`dukki` hardware.md §5.5).
+That figure, plus inference, is what the RL simulation's command delay stands for.
+
+The alternative of the bridge pushing a sample after each command does not suit a fixed control
+rate: the sample would be most of a tick old when the next tick reads it.
 
 ## 2. The link
 
@@ -69,8 +79,10 @@ SYNC 0xD5 0x6B · version (1) · kind (1) · payload length (2, LE) · payload �
 
 | kind | direction | reply | sent |
 |---|---|---|---|
-| `Command` 0x01 | compute → bridge | none | every tick, after the policy |
-| `StateRequest` 0x02 | compute → bridge | `State` 0x81 | every tick, at the start |
+| `SampleRequest` 0x06 | compute → bridge | `Sample` 0x86, after a fresh pass | every tick, at the start |
+| `Targets` 0x05 | compute → bridge | none | every tick, after the policy |
+| `Command` 0x01 | compute → bridge | none | when a mode, gain or action changes, and about once a second |
+| `StateRequest` 0x02 | compute → bridge | `State` 0x81, at once | about once a second, after a tick's targets |
 | `InfoRequest` 0x03 | compute → bridge | `Info` 0x83 | at open |
 | `HostStatus` 0x04 | compute → bridge | none | once a second, and at once when its state changes |
 
@@ -93,6 +105,22 @@ Per servo there is also a one-shot **action** (clear faults, J288 mode 6; reset,
 or repeated frame neither skips nor repeats it. `BridgeIo` uses clear-faults for
 `RobotIo::reboot`; reset is not used, because it is not known whether a J288 keeps its multi-turn
 position across one.
+
+### `Targets` (82 bytes framed)
+
+A sequence number (shared with `Command`'s), the compute module's clock and a target position for
+each servo. The bridge takes everything else — mode, speed, gains, torque, actions — from the last
+full `Command`. It feeds the watchdog and counts as a command for `command_seq`. `BridgeIo` sends
+targets alone when nothing but the positions changed since its last full command, sent under a
+second ago.
+
+### `Sample` (226 bytes framed)
+
+What a tick reads: the bridge's sequence number, the request's timestamp echoed (as for `State`),
+the bridge's clock, the last command's sequence number and age, the flags; per servo the segment
+or absent, position (`f32`), the bridge's velocity and the torque as signed 16-bit counts of
+0.002 rad/s and 0.0001 N·m (±65 rad/s and ±3.3 N·m, saturating), and the reply's age; and the IMU's
+status, 12-byte block, age and rotation-sample counter. `BridgeIo` builds `Sensors` from it.
 
 ### `State` (628 bytes framed)
 
@@ -159,19 +187,20 @@ Before the first command since power-up, the bridge's servos follow its bench co
 
 ## 6. Link budget
 
-Per tick: a state request (18 bytes) and command (367) one way, a state (628) the other. At 2 Mbps,
-10 bits per byte:
+Per tick: a sample request (18 bytes) and targets (82) one way, a sample (226) the other. Once a
+second also a full command (367), a state request (18) and a state (628). At 2 Mbps, 10 bits per
+byte:
 
 | | 50 Hz | 100 Hz |
 |---|---|---|
-| compute → bridge | 1.9 ms of 20 ms | 1.9 ms of 10 ms |
-| bridge → compute | 3.1 ms of 20 ms | 3.1 ms of 10 ms |
-| state round trip | about 3.5 ms | about 3.5 ms |
+| compute → bridge, per tick | 0.5 ms of 20 ms | 0.5 ms of 10 ms |
+| bridge → compute, per tick | 1.1 ms of 20 ms | 1.1 ms of 10 ms |
+| sample round trip (measured) | about 3.5 ms | about 3.5 ms |
 
-`HostStatus` adds 13 bytes a second, nothing at either rate. The link is full duplex, so the two
-directions do not add. 100 Hz uses about a third of each
-direction's time; 4 Mbps halves every figure. `BridgeIo` waits 8 ms for a state before failing the
-read.
+The sample round trip includes the bridge's pass over the servos. `HostStatus` adds 13 bytes a
+second. The link is full duplex, so the two directions do not add, and the once-a-second full
+frames go in the part of a tick that has nothing else on the link. 4 Mbps halves every wire
+figure. `BridgeIo` waits 8 ms for a sample or a state before failing the read.
 
 ## 7. What is not here yet
 

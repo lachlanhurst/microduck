@@ -7,14 +7,19 @@
 //! by both ends — `duck-control` on the compute module and the bridge firmware — so the two cannot
 //! drift apart.
 //!
-//! Four exchanges:
+//! Six exchanges:
 //!
 //! | compute sends | bridge answers | when |
 //! |---|---|---|
-//! | [`Command`] | nothing | once per control tick, after the policy runs |
-//! | [`StateRequest`] | [`State`] | once per control tick, at the start |
+//! | [`SampleRequest`] | [`Sample`], after a fresh pass over the servos | once per control tick, at the start |
+//! | [`Targets`] | nothing | once per control tick, after the policy runs |
+//! | [`Command`] | nothing | when a mode, gain or action changes, and about once a second |
+//! | [`StateRequest`] | [`State`], at once from what it holds | about once a second, for temperatures and diagnostics |
 //! | [`InfoRequest`] | [`Info`] | at startup |
 //! | [`HostStatus`] | nothing | once a second, and at once when the compute module's state changes |
+//!
+//! The per-tick pair is small on purpose: on the 2 Mbps link a [`Sample`] takes 1.1 ms and
+//! [`Targets`] 0.4 ms, where the full [`State`] takes 3.1 ms and [`Command`] 1.8 ms.
 //!
 //! Every frame is `SYNC (2) · version (1) · kind (1) · payload length (2) · payload · CRC-32 (4)`,
 //! little-endian throughout, with the CRC over everything after the sync bytes. A receiver that
@@ -29,7 +34,7 @@
 /// Bumped whenever a payload layout changes. A frame carrying another version is rejected by
 /// [`FrameDecoder`] rather than misread, and [`Info`] lets the compute module say which side is
 /// out of date before anything moves.
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 
 /// Servo slots in [`Command`] and [`State`], indexed by servo ID. The J288 bus addresses 0 to 14
 /// (15 is broadcast), and the robot has fifteen joints with each servo's ID set to its joint's
@@ -54,8 +59,11 @@ pub enum Kind {
     StateRequest = 0x02,
     InfoRequest = 0x03,
     HostStatus = 0x04,
+    Targets = 0x05,
+    SampleRequest = 0x06,
     State = 0x81,
     Info = 0x83,
+    Sample = 0x86,
 }
 
 impl Kind {
@@ -65,8 +73,11 @@ impl Kind {
             0x02 => Kind::StateRequest,
             0x03 => Kind::InfoRequest,
             0x04 => Kind::HostStatus,
+            0x05 => Kind::Targets,
+            0x06 => Kind::SampleRequest,
             0x81 => Kind::State,
             0x83 => Kind::Info,
+            0x86 => Kind::Sample,
             _ => return None,
         })
     }
@@ -181,6 +192,27 @@ pub struct Command {
     /// The compute module's clock when it sent this, µs. Opaque to the bridge.
     pub host_time_us: u64,
     pub servos: [ServoCommand; NUM_SERVOS],
+}
+
+/// New target positions for every servo, sent once per control tick. The bridge takes everything
+/// else — mode, gains, speed, torque, actions — from the last [`Command`], so a tick sends 82 bytes
+/// rather than 367. It counts as a command for the watchdog and for [`State::command_seq`], which
+/// shares its numbering with [`Command::seq`].
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Targets {
+    pub seq: u32,
+    /// The compute module's clock when it sent this, µs. Opaque to the bridge.
+    pub host_time_us: u64,
+    /// Target position for each servo, rad.
+    pub positions: [f32; NUM_SERVOS],
+}
+
+/// Asks for a [`Sample`]. The bridge starts a pass over the servos at once and answers when it
+/// completes, so the sample is fresh rather than up to a pass old.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SampleRequest {
+    /// The compute module's clock, µs, echoed in [`Sample::request_host_time_us`].
+    pub host_time_us: u64,
 }
 
 /// Asks for a [`State`]. The bridge answers from what it already holds, without touching the bus.
@@ -338,6 +370,58 @@ pub struct State {
     pub link_errors: u16,
 }
 
+/// [`ServoSample::velocity`] on the wire: a signed 16-bit count of this, rad/s, so ±65 rad/s.
+pub const VELOCITY_LSB: f32 = 0.002;
+/// [`ServoSample::torque`] on the wire: a signed 16-bit count of this, N·m, so ±3.3 N·m.
+pub const TORQUE_LSB: f32 = 0.0001;
+
+/// One servo, as much of it as a control tick needs.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ServoSample {
+    /// As [`ServoState::segment`]; [`ABSENT`] for an ID no segment found.
+    pub segment: u8,
+    /// As [`ServoState::position`], rad.
+    pub position: f32,
+    /// As [`ServoState::velocity`], rad/s, to [`VELOCITY_LSB`].
+    pub velocity: f32,
+    /// As [`ServoState::torque`], N·m, to [`TORQUE_LSB`].
+    pub torque: f32,
+    /// As [`ServoState::age_us`].
+    pub age_us: u16,
+}
+
+/// The IMU, as much of it as a control tick needs.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ImuSample {
+    /// One of [`imu_status`].
+    pub status: u8,
+    /// As [`ImuState::block`].
+    pub block: [u8; 12],
+    pub age_us: u32,
+    pub rotation_samples: u32,
+}
+
+/// What a control tick reads, answered to a [`SampleRequest`] once a pass over the servos that
+/// started after the request has finished.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Sample {
+    /// Increments per sample frame.
+    pub seq: u32,
+    /// [`SampleRequest::host_time_us`] of the request this answers.
+    pub request_host_time_us: u64,
+    /// The bridge's clock when it built this frame, µs since it started.
+    pub bridge_time_us: u64,
+    /// As [`State::command_seq`].
+    pub command_seq: u32,
+    /// As [`State::command_age_us`].
+    pub command_age_us: u32,
+    /// [`state_flags`] bits.
+    pub flags: u16,
+    /// Indexed by servo ID.
+    pub servos: [ServoSample; NUM_SERVOS],
+    pub imu: ImuSample,
+}
+
 /// What the bridge is, answered to an [`InfoRequest`].
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Info {
@@ -370,6 +454,107 @@ impl Info {
 const SERVO_COMMAND_LEN: usize = 3 + 5 * 4;
 const SERVO_STATE_LEN: usize = 7 + 4 + 4 * 4 + 4 * 2;
 const IMU_STATE_LEN: usize = 1 + 12 + 4 + 6 * 4 + 4 + 4 + 2 + 2;
+const SERVO_SAMPLE_LEN: usize = 1 + 4 + 2 + 2 + 2;
+const IMU_SAMPLE_LEN: usize = 1 + 12 + 4 + 4;
+
+/// `v / lsb` to the nearest count, saturating at the ends of an `i16`. Float-to-int `as` saturates
+/// and sends NaN to 0; `core` has no `round`.
+fn to_count(v: f32, lsb: f32) -> i16 {
+    let x = v / lsb;
+    (if x >= 0.0 { x + 0.5 } else { x - 0.5 }) as i16
+}
+
+impl Message for Targets {
+    const KIND: Kind = Kind::Targets;
+    const PAYLOAD_LEN: usize = 4 + 8 + NUM_SERVOS * 4;
+
+    fn write_payload(&self, w: &mut Writer<'_>) {
+        w.u32(self.seq);
+        w.u64(self.host_time_us);
+        for p in &self.positions {
+            w.f32(*p);
+        }
+    }
+
+    fn read_payload(r: &mut Reader<'_>) -> Result<Self, Error> {
+        let mut t = Targets {
+            seq: r.u32(),
+            host_time_us: r.u64(),
+            ..Default::default()
+        };
+        for p in &mut t.positions {
+            *p = r.f32();
+        }
+        Ok(t)
+    }
+}
+
+impl Message for SampleRequest {
+    const KIND: Kind = Kind::SampleRequest;
+    const PAYLOAD_LEN: usize = 8;
+
+    fn write_payload(&self, w: &mut Writer<'_>) {
+        w.u64(self.host_time_us);
+    }
+
+    fn read_payload(r: &mut Reader<'_>) -> Result<Self, Error> {
+        Ok(SampleRequest {
+            host_time_us: r.u64(),
+        })
+    }
+}
+
+impl Message for Sample {
+    const KIND: Kind = Kind::Sample;
+    const PAYLOAD_LEN: usize =
+        4 + 8 + 8 + 4 + 4 + 2 + NUM_SERVOS * SERVO_SAMPLE_LEN + IMU_SAMPLE_LEN;
+
+    fn write_payload(&self, w: &mut Writer<'_>) {
+        w.u32(self.seq);
+        w.u64(self.request_host_time_us);
+        w.u64(self.bridge_time_us);
+        w.u32(self.command_seq);
+        w.u32(self.command_age_us);
+        w.u16(self.flags);
+        for s in &self.servos {
+            w.u8(s.segment);
+            w.f32(s.position);
+            w.u16(to_count(s.velocity, VELOCITY_LSB) as u16);
+            w.u16(to_count(s.torque, TORQUE_LSB) as u16);
+            w.u16(s.age_us);
+        }
+        let i = &self.imu;
+        w.u8(i.status);
+        w.bytes(&i.block);
+        w.u32(i.age_us);
+        w.u32(i.rotation_samples);
+    }
+
+    fn read_payload(r: &mut Reader<'_>) -> Result<Self, Error> {
+        let mut s = Sample {
+            seq: r.u32(),
+            request_host_time_us: r.u64(),
+            bridge_time_us: r.u64(),
+            command_seq: r.u32(),
+            command_age_us: r.u32(),
+            flags: r.u16(),
+            ..Default::default()
+        };
+        for v in &mut s.servos {
+            v.segment = r.u8();
+            v.position = r.f32();
+            v.velocity = r.u16() as i16 as f32 * VELOCITY_LSB;
+            v.torque = r.u16() as i16 as f32 * TORQUE_LSB;
+            v.age_us = r.u16();
+        }
+        let i = &mut s.imu;
+        i.status = r.u8();
+        r.bytes(&mut i.block);
+        i.age_us = r.u32();
+        i.rotation_samples = r.u32();
+        Ok(s)
+    }
+}
 
 impl Message for Command {
     const KIND: Kind = Kind::Command;
@@ -853,6 +1038,48 @@ mod tests {
         s
     }
 
+    fn sample_targets() -> Targets {
+        let mut t = Targets {
+            seq: 8,
+            host_time_us: 77,
+            ..Default::default()
+        };
+        for (i, p) in t.positions.iter_mut().enumerate() {
+            *p = i as f32 * 0.3 - 2.0;
+        }
+        t
+    }
+
+    /// Every field on a grid of its wire resolution, so the round trip is exact.
+    fn sample_sample() -> Sample {
+        let mut s = Sample {
+            seq: 41,
+            request_host_time_us: 12,
+            bridge_time_us: 9_000_000_123,
+            command_seq: 8,
+            command_age_us: 950,
+            flags: state_flags::COMMANDED | state_flags::SHUTDOWN_REQUESTED,
+            ..Default::default()
+        };
+        for (i, v) in s.servos.iter_mut().enumerate() {
+            *v = ServoSample {
+                segment: (i / 5) as u8,
+                position: 1.5 * i as f32 - 6.0,
+                velocity: (i as f32 - 7.0) * 1000.0 * VELOCITY_LSB,
+                torque: (i as f32 - 7.0) * 100.0 * TORQUE_LSB,
+                age_us: 300 + i as u16,
+            };
+        }
+        s.servos[14].segment = ABSENT;
+        s.imu = ImuSample {
+            status: imu_status::RUNNING,
+            block: [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+            age_us: 4100,
+            rotation_samples: 46_643,
+        };
+        s
+    }
+
     fn frame_of<M: Message>(m: &M) -> Vec<u8> {
         let mut buf = [0u8; MAX_FRAME];
         let n = m.encode(&mut buf).unwrap();
@@ -879,6 +1106,22 @@ mod tests {
     fn every_message_round_trips() {
         let c = sample_command();
         assert_eq!(decode_one::<Command>(&frame_of(&c)), c);
+        let t = sample_targets();
+        assert_eq!(decode_one::<Targets>(&frame_of(&t)), t);
+        let q = SampleRequest { host_time_us: 99 };
+        assert_eq!(decode_one::<SampleRequest>(&frame_of(&q)), q);
+        let back = decode_one::<Sample>(&frame_of(&sample_sample()));
+        let want = sample_sample();
+        assert_eq!(back.servos.map(|v| v.segment), want.servos.map(|v| v.segment));
+        assert_eq!(back.servos.map(|v| v.position), want.servos.map(|v| v.position));
+        assert_eq!(back.servos.map(|v| v.age_us), want.servos.map(|v| v.age_us));
+        for (b, w) in back.servos.iter().zip(&want.servos) {
+            assert!((b.velocity - w.velocity).abs() < VELOCITY_LSB / 2.0);
+            assert!((b.torque - w.torque).abs() < TORQUE_LSB / 2.0);
+        }
+        assert_eq!((back.seq, back.request_host_time_us, back.bridge_time_us), (41, 12, 9_000_000_123));
+        assert_eq!((back.command_seq, back.command_age_us, back.flags), (8, 950, want.flags));
+        assert_eq!(back.imu, want.imu);
         let s = sample_state();
         assert_eq!(decode_one::<State>(&frame_of(&s)), s);
         let r = StateRequest {
@@ -911,6 +1154,23 @@ mod tests {
         assert_eq!(frame_of(&sample_state()).len(), 628);
         assert_eq!(frame_of(&StateRequest::default()).len(), 18);
         assert_eq!(frame_of(&HostStatus::default()).len(), 13);
+        assert_eq!(frame_of(&sample_targets()).len(), 82);
+        assert_eq!(frame_of(&SampleRequest::default()).len(), 18);
+        assert_eq!(frame_of(&sample_sample()).len(), 226);
+    }
+
+    /// Velocity and torque saturate at the ends of their 16-bit range rather than wrapping, so a
+    /// joint spinning past ±65 rad/s reads as fast in the right direction, never as backwards.
+    #[test]
+    fn sample_fields_saturate_rather_than_wrap() {
+        let mut s = sample_sample();
+        s.servos[0].velocity = 1000.0;
+        s.servos[1].velocity = -1000.0;
+        s.servos[2].torque = f32::NAN;
+        let back = decode_one::<Sample>(&frame_of(&s));
+        assert!((back.servos[0].velocity - i16::MAX as f32 * VELOCITY_LSB).abs() < 1e-3);
+        assert!((back.servos[1].velocity - i16::MIN as f32 * VELOCITY_LSB).abs() < 1e-3);
+        assert_eq!(back.servos[2].torque, 0.0);
     }
 
     /// A stream arrives in arbitrary pieces; a frame split across reads must still decode.
