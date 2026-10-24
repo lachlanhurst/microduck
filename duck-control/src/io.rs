@@ -112,6 +112,16 @@ pub struct ImuStale {
     pub run: u64,
 }
 
+/// What the compute module is doing, as it tells a bus that asks: the servo bridge shows it on
+/// its display, and counts the head off a while after it stops commanding while shutting down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HostState {
+    #[default]
+    Running,
+    /// Shutting down for any reason: the bridge's button, `robot.shutdown`, an empty pack.
+    ShuttingDown,
+}
+
 pub trait RobotIo {
     /// One transaction: joints and IMU together.
     fn read(&mut self) -> Result<Sensors>;
@@ -184,6 +194,23 @@ pub trait RobotIo {
     /// Has the orientation filter converged? False for the first moments after startup.
     fn imu_ready(&self) -> bool {
         true
+    }
+
+    /// Whether the robot's side of the bus asks the compute module to shut down: the servo
+    /// bridge's power button, held. Read from the last [`Self::read`]. It stays set until
+    /// [`Self::report_host`] says the compute module is shutting down.
+    ///
+    /// Defaulted false: only the bridge has a button to ask with.
+    fn shutdown_requested(&self) -> bool {
+        false
+    }
+
+    /// Tells the bus what the compute module is doing and how hot it is: once a second, and at
+    /// once when the state changes. Not a motor command, so it may go out on any tick.
+    ///
+    /// Defaulted to doing nothing: only the bridge listens.
+    fn report_host(&mut self, _state: HostState, _cpu_temp_c: Option<f64>) -> Result<()> {
+        Ok(())
     }
 }
 

@@ -156,12 +156,18 @@ The compute module's state, `Running` or `ShuttingDown`, and its hottest thermal
 The bridge has a shutdown button (`dukki` hardware.md §5.8). Held for 3 s, it sets
 `SHUTDOWN_REQUESTED` in every `State` until a `HostStatus` reports `ShuttingDown`, which is the
 acknowledgement; a request nobody acknowledges lapses after 10 s, so a press while robotd is not
-running cannot shut the head down when it next starts. The compute module is to answer it with
-robotd's own shutdown, sitting the robot down before `systemctl poweroff`, as for the pad's
-held Select. robotd does not act on it yet; `examples/bridge_probe` stands in for it on the bench.
+running cannot shut the head down when it next starts. robotd answers it with its own shutdown,
+sitting the robot down before `systemctl poweroff`, as for the pad's held Select: the request is
+latched like `robot.shutdown` and acknowledged on the tick it is seen (`RobotIo::shutdown_requested`
+and `report_host`). robotd also reports `ShuttingDown` for a shutdown from any other cause, and
+sends a `HostStatus` once a second with the hottest thermal zone. `examples/bridge_probe` still
+stands in for it when robotd is not running.
 
 The bridge cannot see the compute module halt. Once a `HostStatus` has said `ShuttingDown` and
-commands have then stopped for 20 s, it shows the head as off and safe to cut power.
+commands have then stopped for 20 s, it shows the head as off and safe to cut power, and on the
+carrier PCB releases its power hold, which turns the robot off; a request left unanswered for
+10 s cuts the power without waiting (`dukki` bridge-pcb.md §6.5). Timed 24/10/2026, the CM4 is
+through its shutdown about 2 s after `systemctl poweroff`.
 
 Both arrived without a version bump: no existing layout changed, older bridge firmware counts a
 `HostStatus` as a bad message and carries on, and older compute-side software ignores the flag.

@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use clap::{Parser, Subcommand};
 use duck_control::fall::{FallPredictor, FallPredictorConfig};
-use duck_control::io::RobotIo;
+use duck_control::io::{HostState, RobotIo};
 use duck_control::obs::{BodyPose, Command as PolicyCommand};
 use duck_control::policy::{DEFAULT_STANDING_THRESHOLD, Policy, PolicyError, PolicyPaths};
 use duck_control::safety::{Safety, SafetyConfig};
@@ -2242,6 +2242,10 @@ async fn control_loop<T: RobotIo>(
     // What the previous tick commanded, which is where the rest ramp starts.
     let mut last_targets = DEFAULT_POSITION;
     let mut powered_off = false;
+    // What the bus is told this head is doing (`RobotIo::report_host`, the bridge's display and
+    // power hold): running until a shutdown starts, then shutting down for good. Sent once a
+    // second with the slow sensors, and at once when it changes.
+    let mut host_state = HostState::Running;
     let mut warned_imu_warming = false;
 
     // Limp-fall (`[safety] limp_fall`): the predictor that sees a fall start, and where the
@@ -2877,6 +2881,17 @@ async fn control_loop<T: RobotIo>(
         // `robot.rest` runs the same sit and rest pose and ends limp, servos rebooted, instead of
         // powered off. A power-off asked for during a rest stays latched and runs once the rest
         // has ended — on a limp robot, so straight to the power-off.
+        //
+        // The bridge's power button (hardware.md 5.8) asks through the bus. It is latched like
+        // `robot.shutdown`, so one pressed during a rest runs when the rest ends, and acknowledged
+        // at once: the bridge asks on every reply until told the head is shutting down, and an
+        // unanswered request lapses after 10 s, when the bridge cuts the power without waiting.
+        if host_state == HostState::Running && safety.shutdown_requested() {
+            tracing::warn!("shutdown: asked for by the bridge's power button");
+            intents.request_shutdown();
+            host_state = HostState::ShuttingDown;
+            report_host(&mut safety, host_state);
+        }
         let (shutdown, rest) = if !powered_off && shutdown_sit.is_none() {
             (
                 intents.take_shutdown() || battery_empty,
@@ -2906,6 +2921,12 @@ async fn control_loop<T: RobotIo>(
         }
         if shutdown {
             shutdown_power_off = true;
+            // Told before anything else: the bridge counts the head off once commands have
+            // stopped for a while after this, then turns the robot's power off.
+            if host_state == HostState::Running {
+                host_state = HostState::ShuttingDown;
+                report_host(&mut safety, host_state);
+            }
             let can_sit = snapshot.enabled
                 && bringup == Bringup::Ready
                 && !safety.fallen()
@@ -3908,6 +3929,7 @@ async fn control_loop<T: RobotIo>(
             window_ticks = 0;
 
             publish_slow_sensors(&mut safety, &state);
+            report_host(&mut safety, host_state);
 
             if last_summary.elapsed() >= LOOP_SUMMARY_INTERVAL {
                 tracing::info!(
@@ -4026,6 +4048,15 @@ fn limit_name(limit: duck_control::safety::Limit) -> &'static str {
         Limit::Deadman => "deadman",
         Limit::Range => "joint_range",
         Limit::NotFinite => "not_finite",
+    }
+}
+
+/// Tells the bus what this head is doing and how hot it is ([`RobotIo::report_host`]; only the
+/// bridge listens). A send that fails is logged and dropped: the next is at most a second away,
+/// and a lost shutting-down report leaves the bridge asking, which the next one answers.
+fn report_host<T: RobotIo>(io: &mut Safety<T>, state: HostState) {
+    if let Err(e) = io.report_host(state, soc::hottest_zone_c()) {
+        tracing::debug!(error = %e, ?state, "host status not sent");
     }
 }
 
@@ -6819,6 +6850,105 @@ mod tests {
         assert!(
             powered.load(Ordering::Relaxed),
             "poweroff must have been asked for"
+        );
+    }
+
+    /// A bus that holds the bridge's power button down until told the head is shutting down, as
+    /// the bridge does, and keeps every report it is sent.
+    struct ButtonIo {
+        io: FakeIo,
+        reports: Arc<std::sync::Mutex<Vec<HostState>>>,
+    }
+    impl RobotIo for ButtonIo {
+        fn read(&mut self) -> duck_control::io::Result<duck_control::Sensors> {
+            self.io.read()
+        }
+        fn write(&mut self, t: &duck_control::JointTargets) -> duck_control::io::Result<()> {
+            self.io.write(t)
+        }
+        fn set_gain(&mut self, kp: u16) -> duck_control::io::Result<()> {
+            self.io.set_gain(kp)
+        }
+        fn set_torque(&mut self, on: bool) -> duck_control::io::Result<()> {
+            self.io.set_torque(on)
+        }
+        fn reboot(&mut self, id: u8) -> duck_control::io::Result<()> {
+            self.io.reboot(id)
+        }
+        fn slow_sensors(&mut self) -> duck_control::io::Result<duck_control::SlowSensors> {
+            self.io.slow_sensors()
+        }
+        fn shutdown_requested(&self) -> bool {
+            !self
+                .reports
+                .lock()
+                .unwrap()
+                .contains(&HostState::ShuttingDown)
+        }
+        fn report_host(
+            &mut self,
+            state: HostState,
+            _cpu_temp_c: Option<f64>,
+        ) -> duck_control::io::Result<()> {
+            self.reports.lock().unwrap().push(state);
+            Ok(())
+        }
+    }
+
+    /// The bridge's power button shuts the head down the way `robot.shutdown` does, and the bridge
+    /// is told at once: it keeps asking until it hears the head is shutting down, and cuts the
+    /// power without waiting if nobody answers.
+    #[tokio::test(start_paused = true)]
+    async fn the_bridge_button_is_acknowledged_and_powers_off() {
+        let mut params = Params::default();
+        params.policy.enabled = false;
+        let s = Arc::new(RobotState::new(
+            &params,
+            std::path::Path::new("/test/robotd.toml"),
+            false,
+            false,
+        ));
+        let intents = Arc::new(Intents::new());
+        let reports = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let powered = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&powered);
+        let poweroff: PowerOff = Arc::new(move || observed.store(true, Ordering::Relaxed));
+
+        let loop_state = Arc::clone(&s);
+        let handle = tokio::spawn(control_loop(
+            ButtonIo {
+                io: FakeIo::at(DEFAULT_POSITION),
+                reports: Arc::clone(&reports),
+            },
+            loop_state,
+            Arc::clone(&intents),
+            params,
+            PathBuf::from("/nonexistent/robotd.toml"),
+            Duration::from_millis(2),
+            poweroff,
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !powered.load(Ordering::Relaxed) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        s.shutdown.store(true, Ordering::Relaxed);
+        handle.await.unwrap();
+
+        assert!(
+            powered.load(Ordering::Relaxed),
+            "poweroff must have been asked for"
+        );
+        let reports = reports.lock().unwrap();
+        assert_eq!(
+            reports.first(),
+            Some(&HostState::ShuttingDown),
+            "acknowledged before anything else: {reports:?}"
+        );
+        assert!(
+            !reports.contains(&HostState::Running),
+            "never running again once shutting down: {reports:?}"
         );
     }
 

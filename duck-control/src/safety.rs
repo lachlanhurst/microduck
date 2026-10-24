@@ -197,6 +197,20 @@ impl<T: RobotIo> Safety<T> {
         self.io.imu_ready()
     }
 
+    /// The bus's shutdown request (the bridge's button) and the compute module's report back.
+    /// Neither moves a motor.
+    pub fn shutdown_requested(&self) -> bool {
+        self.io.shutdown_requested()
+    }
+
+    pub fn report_host(
+        &mut self,
+        state: crate::io::HostState,
+        cpu_temp_c: Option<f64>,
+    ) -> Result<(), IoError> {
+        self.io.report_host(state, cpu_temp_c)
+    }
+
     pub fn fallen(&self) -> bool {
         self.fallen
     }

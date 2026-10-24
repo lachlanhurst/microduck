@@ -20,7 +20,9 @@ use std::time::{Duration, Instant};
 use duck_bridge_proto::{self as proto, Action, FrameDecoder, Message, ServoMode};
 
 use crate::imu::SflpDecoder;
-use crate::io::{ImuStale, IoError, JointTargets, Result, RobotIo, Sensors, SlowSensors};
+use crate::io::{
+    HostState, ImuStale, IoError, JointTargets, Result, RobotIo, Sensors, SlowSensors,
+};
 use crate::model::{JOINT_IDS, NUM_JOINTS};
 
 /// What the bridge firmware runs today (`link.rs` there). 4 Mbps waits on a scope check of the
@@ -526,6 +528,18 @@ impl<T: Read + Write> RobotIo for BridgeIo<T> {
 
     fn imu_ready(&self) -> bool {
         self.imu.ready() && self.imu_status == proto::imu_status::RUNNING
+    }
+
+    fn shutdown_requested(&self) -> bool {
+        BridgeIo::shutdown_requested(self)
+    }
+
+    fn report_host(&mut self, state: HostState, cpu_temp_c: Option<f64>) -> Result<()> {
+        let state = match state {
+            HostState::Running => proto::HeadState::Running,
+            HostState::ShuttingDown => proto::HeadState::ShuttingDown,
+        };
+        self.send_host_status(state, cpu_temp_c)
     }
 }
 
