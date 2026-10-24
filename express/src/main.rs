@@ -91,12 +91,12 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     fan_channel: u32,
     /// PWM frequency. The head's 2-wire fan stalls at any duty short of full at 25 kHz, which
-    /// browns out its own electronics every cycle; at 100 Hz it runs from 20 % with a slight hum
-    /// (measured 24/10/2026).
-    #[arg(long, default_value_t = 100)]
+    /// browns out its own electronics every cycle; at 100 Hz and 200 Hz it runs from 20 %, with
+    /// less hum at 200 (measured 24/10/2026).
+    #[arg(long, default_value_t = 200)]
     fan_hz: u32,
     /// Lowest running duty, 0 to 1. Below it a 2-wire fan stalls: the head's fan holds at 20 % at
-    /// 100 Hz, so 25 % leaves a margin for a cold or dusty one.
+    /// 200 Hz, so 25 % leaves a margin for a cold or dusty one.
     #[arg(long, default_value_t = 0.25)]
     fan_min: f32,
     /// SoC temperature (°C) the fan starts at, at its minimum speed.
