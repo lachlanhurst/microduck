@@ -12,7 +12,8 @@
 //! Two rules, unconditional:
 //!
 //!  - **Non-finite rejection.** A `NaN` target is not clamped, it is refused outright.
-//!  - **Range clamp.** Targets are held inside the actuator's travel.
+//!  - **Range clamp.** Targets are held inside the actuator's travel, and inside the few
+//!    joint stops tighter than it ([`JOINT_STOPS`]).
 //!
 //! Plus a deadman on the command itself: if intents stop arriving, the velocity goes to
 //! zero. **Stop is not limp** — losing comms makes the robot *stand still*, because standing
@@ -34,7 +35,7 @@
 use std::time::Duration;
 
 use crate::io::{IoError, JointTargets, RobotIo, Sensors};
-use crate::model::NUM_JOINTS;
+use crate::model::{JOINT_NAMES, NUM_JOINTS};
 use crate::obs::Command;
 
 /// The XL330's position range: one turn, centred, from the count↔radian conversion.
@@ -46,6 +47,36 @@ use crate::obs::Command;
 /// because a limit that looks per-joint but is not would imply protection nobody has.
 pub const ACTUATOR_MIN: f64 = -std::f64::consts::PI;
 pub const ACTUATOR_MAX: f64 = std::f64::consts::PI;
+
+/// Dukki's head roll (left to right tilt) stop, either way: 15°.
+///
+/// A physical stop that damage may follow past (09/11/2026), so the servo is never asked to
+/// drive into it. The RL tasks clip the same target at the same angle
+/// (microduck_rl `dukki_constants.HEAD_ROLL_LIMIT_DEG`), so the policy meets on the robot the
+/// clamp it was trained with.
+pub const HEAD_ROLL_STOP: f64 = 15.0_f64.to_radians();
+
+/// Joint stops tighter than the actuator's travel, by joint name: `(joint, min, max)` in
+/// radians. Unlike [`ACTUATOR_MIN`]/[`ACTUATOR_MAX`] these are per-joint and mechanical: a
+/// target past one is clamped to it like any other out-of-range target.
+pub const JOINT_STOPS: [(&str, f64, f64); 1] = [("head_roll", -HEAD_ROLL_STOP, HEAD_ROLL_STOP)];
+
+/// Each joint's target range: the actuator's travel, narrowed by [`JOINT_STOPS`].
+///
+/// # Panics
+/// If a stop names a joint that is not in [`JOINT_NAMES`]: a stop that silently matched
+/// nothing would be protection nobody has.
+pub fn target_ranges() -> [(f64, f64); NUM_JOINTS] {
+    let mut ranges = [(ACTUATOR_MIN, ACTUATOR_MAX); NUM_JOINTS];
+    for (joint, min, max) in JOINT_STOPS {
+        let i = JOINT_NAMES
+            .iter()
+            .position(|name| *name == joint)
+            .unwrap_or_else(|| panic!("joint stop for unknown joint {joint}"));
+        ranges[i] = (min.max(ACTUATOR_MIN), max.min(ACTUATOR_MAX));
+    }
+    ranges
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SafetyConfig {
@@ -84,7 +115,7 @@ impl Default for SafetyConfig {
 pub enum Limit {
     /// Intents went stale; the velocity was zeroed.
     Deadman,
-    /// A target was outside the actuator's travel.
+    /// A target was outside the actuator's travel or past a joint stop.
     Range,
     /// A target was `NaN` or infinite.
     NotFinite,
@@ -160,6 +191,8 @@ pub struct Safety<T: RobotIo> {
     /// one news. Until one has, the robot has no driver to have lost. See
     /// [`Self::deadman_is_news`].
     deadman_armed: bool,
+    /// Each joint's target range, from [`target_ranges`].
+    ranges: [(f64, f64); NUM_JOINTS],
 }
 
 impl<T: RobotIo> Safety<T> {
@@ -172,6 +205,7 @@ impl<T: RobotIo> Safety<T> {
             gain: None,
             runs: LimitRuns::default(),
             deadman_armed: false,
+            ranges: target_ranges(),
         }
     }
 
@@ -405,7 +439,8 @@ impl<T: RobotIo> Safety<T> {
         let mut clamped_joints = 0u32;
         let mut first_clamped = None;
         for (joint, value) in safe.iter_mut().enumerate() {
-            let clamped = value.clamp(ACTUATOR_MIN, ACTUATOR_MAX);
+            let (min, max) = self.ranges[joint];
+            let clamped = value.clamp(min, max);
             if clamped != *value {
                 clamped_joints += 1;
                 first_clamped.get_or_insert(joint);
@@ -421,7 +456,7 @@ impl<T: RobotIo> Safety<T> {
                     joints = clamped_joints,
                     first_joint = first,
                     tripped = self.runs.range,
-                    "joint targets clamped to the actuator's travel"
+                    "joint targets clamped to the actuator's travel or a joint stop"
                 );
             }
         } else {
@@ -704,6 +739,61 @@ mod tests {
         assert_eq!(written[7], ACTUATOR_MIN);
     }
 
+    /// Head roll stops at ±15°, a physical stop that damage may follow past: a target past it is
+    /// clamped to it and reported, and the joints either side keep the actuator's travel.
+    #[test]
+    fn head_roll_is_clamped_at_its_stop() {
+        let mut s = safety();
+        s.observe(&upright(), Duration::from_millis(20));
+        let roll = JOINT_NAMES.iter().position(|n| *n == "head_roll").unwrap();
+
+        for (asked, expected) in [(0.5, HEAD_ROLL_STOP), (-0.5, -HEAD_ROLL_STOP)] {
+            let mut targets = DEFAULT_POSITION;
+            targets[roll] = asked;
+            targets[roll - 1] = 2.0; // head_yaw: well past 15°, inside its travel
+            let applied = s
+                .apply(
+                    targets,
+                    DEFAULT_POSITION,
+                    SafetyConfig::default().gain_running,
+                )
+                .unwrap();
+            assert!(applied.limited_by(Limit::Range));
+            let written = s.io().last_written.unwrap().positions;
+            assert_eq!(written[roll], expected);
+            assert_eq!(written[roll - 1], 2.0);
+        }
+
+        // Just inside the stop passes untouched.
+        let mut targets = DEFAULT_POSITION;
+        targets[roll] = HEAD_ROLL_STOP - 1e-6;
+        let applied = s
+            .apply(
+                targets,
+                DEFAULT_POSITION,
+                SafetyConfig::default().gain_running,
+            )
+            .unwrap();
+        assert!(!applied.limited_by(Limit::Range));
+        assert_eq!(
+            s.io().last_written.unwrap().positions[roll],
+            HEAD_ROLL_STOP - 1e-6
+        );
+    }
+
+    #[test]
+    fn head_roll_stop_is_fifteen_degrees() {
+        assert!((HEAD_ROLL_STOP - 0.261_799_387_799_149_4).abs() < 1e-12);
+        let ranges = target_ranges();
+        let roll = JOINT_NAMES.iter().position(|n| *n == "head_roll").unwrap();
+        assert_eq!(ranges[roll], (-HEAD_ROLL_STOP, HEAD_ROLL_STOP));
+        for (i, range) in ranges.iter().enumerate() {
+            if i != roll {
+                assert_eq!(*range, (ACTUATOR_MIN, ACTUATOR_MAX), "{}", JOINT_NAMES[i]);
+            }
+        }
+    }
+
     /// An ordinary tick must pass through untouched, or the clamp is silently mangling
     /// normal operation and every other test here proves nothing.
     #[test]
@@ -884,14 +974,15 @@ mod tests {
             "a refused target must not reach the servos"
         );
 
-        // Clamped: every joint lands on the boundary, none beyond it.
+        // Clamped: every joint lands on its boundary (the actuator's travel, or its joint
+        // stop), none beyond it.
         s.apply(over_travel(), DEFAULT_POSITION, gain()).unwrap();
         let written = s.io().last_written.unwrap().positions;
         assert!(
             written.iter().all(|v| *v <= ACTUATOR_MAX),
             "nothing past the actuator's travel: {written:?}"
         );
-        assert_eq!(written, [ACTUATOR_MAX; NUM_JOINTS]);
+        assert_eq!(written, target_ranges().map(|(_, max)| max));
     }
 
     /// A robot nobody has driven since it started says nothing about the deadman, however
