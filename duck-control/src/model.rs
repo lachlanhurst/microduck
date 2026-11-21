@@ -67,21 +67,21 @@ pub const DEFAULT_POSITION: [f64; NUM_JOINTS] = [
 /// holds those targets up to 3.5° short of them during the ramp; they settle the rest of the way
 /// when torque goes.
 pub const REST_POSITION: [f64; NUM_JOINTS] = [
-    0.1525,  // left_hip_yaw
-    0.4716,  // left_hip_roll
-    -0.3759, // left_hip_pitch
-    1.4410,  // left_knee
-    0.5450,  // left_ankle
-    0.5481,  // neck_pitch
-    0.6537,  // head_pitch
-    0.0046,  // head_yaw
-    0.0004,  // head_roll
+    0.1118,  // left_hip_yaw
+    0.4862,  // left_hip_roll
+    -0.3475, // left_hip_pitch
+    1.4747,  // left_knee
+    0.5795,  // left_ankle
+    0.5335,  // neck_pitch
+    0.6061,  // head_pitch
+    0.0054,  // head_yaw
+    0.0096,  // head_roll
     -0.1370, // mouth
-    0.0946,  // right_hip_yaw
-    -0.4249, // right_hip_roll
-    0.3280,  // right_hip_pitch
-    -1.5061, // right_knee
-    -0.4390, // right_ankle
+    0.0793,  // right_hip_yaw
+    -0.4218, // right_hip_roll
+    0.3234,  // right_hip_pitch
+    -1.4908, // right_knee
+    -0.4352, // right_ankle
 ];
 
 /// Mouth travel, radians: closed and fully open. Closed is the alpha's −5° (the v1.6 range,
@@ -164,28 +164,28 @@ pub fn homing_offset(id: u8) -> i32 {
 /// `hardware/calibration/joint_travel.json`).
 ///
 /// In the frame `[bus.bridge_zero]` defines: measured against zeros judged by eye on 21/11/2026,
-/// then restated against the zeros the calibration jig gave the same day (dukki
-/// `hardware/calibration/bridge_zero.toml`). Recalibrate both together; a travel table in one
+/// then restated against the zeros the calibration jig gave the same day, averaged over four
+/// seatings (dukki `hardware/calibration/bridge_zero.toml`). Recalibrate both together; a travel table in one
 /// frame and zeros in another puts every stop in the wrong place.
 ///
 /// Two uses: [`crate::safety::target_ranges`] keeps targets [`STOP_MARGIN_DEG`] inside it, and
 /// [`crate::bridge`] uses its middle to decide which turn a servo is on.
 pub const JOINT_TRAVEL_DEG: [(f64, f64); NUM_JOINTS] = [
-    (-42.5, 45.5),   // left_hip_yaw
-    (-20.6, 26.8),   // left_hip_roll
-    (-229.9, 80.5),  // left_hip_pitch
-    (-119.3, 86.0),  // left_knee
-    (-79.9, 69.8),   // left_ankle
-    (-150.0, 35.2),  // neck_pitch
-    (-82.9, 98.3),   // head_pitch
+    (-44.8, 43.2),   // left_hip_yaw
+    (-19.8, 27.6),   // left_hip_roll
+    (-228.3, 82.1),  // left_hip_pitch
+    (-117.4, 87.9),  // left_knee
+    (-77.9, 71.8),   // left_ankle
+    (-150.8, 34.4),  // neck_pitch
+    (-85.6, 95.6),   // head_pitch
     (-177.2, 168.3), // head_yaw
-    (-20.9, 20.4),   // head_roll
+    (-20.4, 20.9),   // head_roll
     (-9.4, 24.9),    // mouth
-    (-35.7, 46.5),   // right_hip_yaw
-    (-25.4, 24.3),   // right_hip_roll
-    (-81.7, 200.5),  // right_hip_pitch
-    (-85.9, 117.8),  // right_knee
-    (-73.4, 76.5),   // right_ankle
+    (-36.6, 45.6),   // right_hip_yaw
+    (-25.2, 24.5),   // right_hip_roll
+    (-82.0, 200.2),  // right_hip_pitch
+    (-85.0, 118.7),  // right_knee
+    (-73.2, 76.7),   // right_ankle
 ];
 
 /// Whether [`JOINT_TRAVEL_DEG`] is against the calibration jig's zeros, and so true enough to

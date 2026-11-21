@@ -51,6 +51,16 @@ port = "/dev/ttyS7"
 # left_hip_yaw = 0
 # ... one line per joint, as named in duck-ipc-proto's JOINT_NAMES
 
+# This robot's trunk IMU mount, a [bus.bridge_imu_mount] table: the rotation from the IMU chip's
+# frame to the trunk's as a unit quaternion, w x y z. Written by the calibration (dukki's
+# scripts/joint_scope/seatings.py). Absent, the mount as designed, which a built robot's board
+# sits a few degrees off.
+# [bus.bridge_imu_mount]
+# w = 0.5
+# x = -0.5
+# y = -0.5
+# z = 0.5
+
 # Read the bus with fast sync read (protocol 2.0 instruction 0x8A) instead of a plain sync
 # read. The 16 devices append their answers to one status packet rather than each sending
 # its own, so the bus turns around once per tick instead of 16 times.

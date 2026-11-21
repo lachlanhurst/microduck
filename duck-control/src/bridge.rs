@@ -74,6 +74,9 @@ pub struct BridgeConfig {
     /// Each joint's zero as its output encoder reads it, counts (8192 a turn), indexed as
     /// [`crate::model::JOINT_NAMES`]. `None` passes positions through in the servos' own frame.
     pub zero_counts: Option<[u16; NUM_JOINTS]>,
+    /// The trunk IMU's sensor-to-trunk rotation, scalar-first. [`SflpDecoder::DUKKI_MOUNT`]
+    /// unless a calibration says otherwise.
+    pub imu_mount: [f64; 4],
 }
 
 impl Default for BridgeConfig {
@@ -82,6 +85,7 @@ impl Default for BridgeConfig {
             kp_per_gain: 0.01,
             kd: 0.05,
             zero_counts: None,
+            imu_mount: SflpDecoder::DUKKI_MOUNT,
         }
     }
 }
@@ -165,7 +169,7 @@ impl<T: Read + Write> BridgeIo<T> {
             last_sample: None,
             flags: 0,
             imu_status: proto::imu_status::STARTING,
-            imu: SflpDecoder::default(),
+            imu: SflpDecoder::new(config.imu_mount),
             stale_imu: ImuStale::default(),
             last_rotation_samples: None,
             offsets: match config.zero_counts {

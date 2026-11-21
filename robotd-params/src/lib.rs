@@ -2102,6 +2102,30 @@ pub struct Bus {
     /// bridge reports every servo in its own frame, which nothing that drives the robot can use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge_zero: Option<BridgeZero>,
+    /// This robot's trunk IMU mount: the rotation from the IMU chip's frame to the trunk's,
+    /// scalar-first, measured with the robot in the calibration jig and held upright (dukki's
+    /// `scripts/joint_scope/seatings.py`). Absent, the bridge client uses Dukki's mount as
+    /// designed (`SflpDecoder::DUKKI_MOUNT`), which a built robot's board sits a few degrees off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge_imu_mount: Option<ImuMount>,
+}
+
+/// A rotation as a unit quaternion, scalar first.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImuMount {
+    pub w: f64,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+impl ImuMount {
+    /// `[w, x, y, z]`, normalised.
+    pub fn wxyz(&self) -> [f64; 4] {
+        let n = (self.w * self.w + self.x * self.x + self.y * self.y + self.z * self.z).sqrt();
+        [self.w / n, self.x / n, self.y / n, self.z / n]
+    }
 }
 
 /// One encoder count per joint, by joint name, so a hand edit cannot shift the table along by
@@ -2234,6 +2258,7 @@ impl Default for Bus {
             bridge_kp_per_gain: 0.01,
             bridge_kd: 0.05,
             bridge_zero: None,
+            bridge_imu_mount: None,
         }
     }
 }
@@ -2290,6 +2315,10 @@ pub enum ParamsError {
         joint: &'static str,
         got: u16,
     },
+    #[error(
+        "{path}: bus.bridge_imu_mount must be a unit quaternion (w, x, y, z), got length {norm}"
+    )]
+    ImuMount { path: String, norm: f64 },
     #[error("{path}: control.hz must be between 1 and 1000, got {got}")]
     Rate { path: String, got: u32 },
     #[error(
@@ -2415,6 +2444,17 @@ impl Params {
                         got,
                     });
                 }
+            }
+        }
+        if let Some(m) = &self.bus.bridge_imu_mount {
+            let norm = (m.w * m.w + m.x * m.x + m.y * m.y + m.z * m.z).sqrt();
+            // Written by a tool to five places, so well inside this; a hand edit that lost a
+            // component or a sign of a digit is far outside it.
+            if !(0.999..=1.001).contains(&norm) {
+                return Err(ParamsError::ImuMount {
+                    path: path.display().to_string(),
+                    norm,
+                });
             }
         }
         if self.control.hz == 0 || self.control.hz > 1000 {
@@ -3624,12 +3664,38 @@ mod tests {
         let path = write(dir.path(), &bridge_zero_toml(Some("head_yaw"), |_| 10));
         assert!(Params::load(&path, true).is_err(), "missing head_yaw");
 
-        let path = write(dir.path(), &bridge_zero_toml(None, |i| if i == 3 { 8192 } else { 10 }));
+        let path = write(
+            dir.path(),
+            &bridge_zero_toml(None, |i| if i == 3 { 8192 } else { 10 }),
+        );
         let error = Params::load(&path, true).expect_err("refused").to_string();
         assert!(error.contains("bus.bridge_zero.left_knee"), "{error}");
 
-        let path = write(dir.path(), &bridge_zero_toml(None, |i| if i == 3 { 8191 } else { 10 }));
+        let path = write(
+            dir.path(),
+            &bridge_zero_toml(None, |i| if i == 3 { 8191 } else { 10 }),
+        );
         assert!(Params::load(&path, true).is_ok());
+    }
+
+    /// The IMU mount is optional, and must be a unit quaternion when present.
+    #[test]
+    fn the_imu_mount_must_be_a_unit_quaternion() {
+        assert_eq!(Params::default().bus.bridge_imu_mount, None);
+        let dir = tempfile::tempdir().unwrap();
+        let good = "[bus.bridge_imu_mount]\nw = 0.48797\nx = -0.52513\ny = -0.49241\nz = 0.49362\n";
+        let mount = Params::load(&write(dir.path(), good), true)
+            .unwrap()
+            .bus
+            .bridge_imu_mount
+            .unwrap();
+        let q = mount.wxyz();
+        assert!((q.iter().map(|v| v * v).sum::<f64>() - 1.0).abs() < 1e-12);
+        let bad = "[bus.bridge_imu_mount]\nw = 0.5\nx = -0.5\ny = -0.5\nz = 0.0\n";
+        let error = Params::load(&write(dir.path(), bad), true)
+            .expect_err("refused")
+            .to_string();
+        assert!(error.contains("bus.bridge_imu_mount"), "{error}");
     }
 
     /// A `_min` written as a magnitude would turn full stick back into walking forward. Refused,

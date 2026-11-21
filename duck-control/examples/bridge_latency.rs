@@ -181,6 +181,7 @@ fn main() {
         kd: KD,
         // Servo positions as the servos report them: this times steps, not poses.
         zero_counts: None,
+        ..BridgeConfig::default()
     };
     let mut io = BridgeIo::open(&port, duck_control::bridge::DEFAULT_BAUD, config)
         .unwrap_or_else(|e| {

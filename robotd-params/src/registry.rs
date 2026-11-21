@@ -138,8 +138,15 @@ pub const REGISTRY: &[Entry] = &[
     ),
     entry(
         "bus.bridge_zero",
-        Kind::Record("left_hip_yaw = 0\nleft_hip_roll = 0\nleft_hip_pitch = 0\nleft_knee = 0\nleft_ankle = 0\nneck_pitch = 0\nhead_pitch = 0\nhead_yaw = 0\nhead_roll = 0\nmouth = 0\nright_hip_yaw = 0\nright_hip_roll = 0\nright_hip_pitch = 0\nright_knee = 0\nright_ankle = 0"),
+        Kind::Record(
+            "left_hip_yaw = 0\nleft_hip_roll = 0\nleft_hip_pitch = 0\nleft_knee = 0\nleft_ankle = 0\nneck_pitch = 0\nhead_pitch = 0\nhead_yaw = 0\nhead_roll = 0\nmouth = 0\nright_hip_yaw = 0\nright_hip_roll = 0\nright_hip_pitch = 0\nright_knee = 0\nright_ankle = 0",
+        ),
         "This robot's joint zeros in J288 encoder counts — the calibration jig writes them; absent, joints read in the servos' own frame",
+    ),
+    entry(
+        "bus.bridge_imu_mount",
+        Kind::Record("w = 0.5\nx = -0.5\ny = -0.5\nz = 0.5"),
+        "This robot's trunk IMU mount, chip to trunk — a calibration writes it; absent, the mount as designed",
     ),
     // ── [control] ────────────────────────────────────────────────────────────
     entry("control.hz", Kind::Integer, "Control loop rate"),

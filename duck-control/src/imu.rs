@@ -87,6 +87,12 @@ impl SflpDecoder {
     /// [`Self::DEFAULT_MOUNT`] its trunk read `x` up, a 90° rotation about Y away from this.
     pub const BETA_MOUNT: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
 
+    /// Dukki's mount as designed: the LSM6DSV16X on the bridge PCB, its axes `x` along the
+    /// trunk's `+y`, `y` along `−z` and `z` along `−x` (the `imu_chip` site of Dukki's MJCF, from
+    /// the Fusion model). A built robot's board sits a few degrees off it; robotd takes the
+    /// measured mount from `bus.bridge_imu_mount` when it has one.
+    pub const DUKKI_MOUNT: [f64; 4] = [0.5, -0.5, -0.5, 0.5];
+
     pub fn new(mount: [f64; 4]) -> Self {
         Self {
             mount,
@@ -248,6 +254,25 @@ const _: () = assert!(NUM_JOINTS > 0);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Dukki's designed mount, as its MJCF's `imu_chip` site has it: on its back (the jig) the
+    /// trunk's down is `−x` and the chip reads it along its `+z`; upright the trunk's down is
+    /// `−z` and the chip reads it along its `+y`.
+    #[test]
+    fn dukki_mount_matches_the_chip_site() {
+        for (sensor, trunk) in [
+            ([0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]),
+            ([0.0, 1.0, 0.0], [0.0, 0.0, -1.0]),
+        ] {
+            let got = rotate(SflpDecoder::DUKKI_MOUNT, sensor);
+            for k in 0..3 {
+                assert!(
+                    (got[k] - trunk[k]).abs() < 1e-12,
+                    "{sensor:?} -> {got:?}, want {trunk:?}"
+                );
+            }
+        }
+    }
 
     /// Half-precision decoding is hand-rolled, so pin the cases that matter: zero, one,
     /// a negative, and a subnormal. A wrong exponent bias here silently tilts the horizon.

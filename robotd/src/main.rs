@@ -1322,7 +1322,16 @@ fn open_bridge(bus: &params::Bus, attempt: u32) -> Option<duck_control::bridge::
         kp_per_gain: bus.bridge_kp_per_gain,
         kd: bus.bridge_kd,
         zero_counts: bus.bridge_zero.map(|z| z.counts()),
+        imu_mount: bus
+            .bridge_imu_mount
+            .map_or(duck_control::imu::SflpDecoder::DUKKI_MOUNT, |m| m.wxyz()),
     };
+    if loud && bus.bridge_imu_mount.is_none() {
+        tracing::warn!(
+            "no [bus.bridge_imu_mount] in robotd.toml: the trunk IMU is read with its mount as \
+             designed, a few degrees from a built robot's"
+        );
+    }
     if loud && bus.bridge_zero.is_none() {
         tracing::error!(
             "no [bus.bridge_zero] in robotd.toml: joints read in the servos' own frame, so poses, \

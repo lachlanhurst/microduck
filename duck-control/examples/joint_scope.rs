@@ -18,7 +18,7 @@
 //! newline-terminated:
 //!
 //! ```text
-//! {"t":12.34,"limp":true,"flags":2,"pack_mv":24100,"servos":[
+//! {"t":12.34,"limp":true,"flags":2,"pack_mv":24100,"imu":{"status":4,"gravity_mg":[1.0,-3.2,998.1]},"servos":[
 //!   {"id":0,"seg":0,"mode":1,"pos":0.123,"vel":0.0,"tq":0.001,"enc":4096,"temp":31,"err":0,"age":420},
 //!   {"id":1,"seg":null}, ...]}
 //! ```
@@ -138,6 +138,9 @@ fn line(t: f64, limp: bool, s: &proto::State) -> String {
         "limp": limp,
         "flags": s.flags,
         "pack_mv": s.pack_mv,
+        // The trunk IMU: its status and the chip's SFLP gravity estimate in its own frame, mg,
+        // for calibrating its mounting against known poses.
+        "imu": { "status": s.imu.status, "gravity_mg": s.imu.gravity_mg, "block": s.imu.block },
         "servos": servos,
     })
     .to_string();
@@ -153,6 +156,7 @@ fn main() {
         // The servos' own frame: the stream carries raw positions and encoder counts, and the
         // calibration it feeds is what produces the zeros.
         zero_counts: None,
+        ..BridgeConfig::default()
     };
     let mut io = match BridgeIo::open(&args.port, args.baud, config) {
         Ok(io) => io,
