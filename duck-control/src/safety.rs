@@ -649,7 +649,7 @@ mod tests {
         assert!(s.fallen(), "the verdict is still tracked");
 
         let mut wanted = DEFAULT_POSITION;
-        wanted[0] = 0.9;
+        wanted[0] = 0.5; // left hip yaw, inside its stops
         let applied = s
             .apply(
                 wanted,
@@ -683,7 +683,7 @@ mod tests {
         assert!(s.fallen(), "the verdict is still tracked");
 
         let mut wanted = DEFAULT_POSITION;
-        wanted[0] = 0.9;
+        wanted[0] = 0.5; // left hip yaw, inside its stops
         let applied = s
             .apply(
                 wanted,
@@ -756,12 +756,13 @@ mod tests {
 
         assert!(applied.limited_by(Limit::Range));
         let written = s.io().last_written.unwrap().positions;
-        assert_eq!(written[2], ACTUATOR_MAX);
-        assert_eq!(written[7], ACTUATOR_MIN);
+        let ranges = target_ranges();
+        assert_eq!(written[2], ranges[2].1);
+        assert_eq!(written[7], ranges[7].0);
     }
 
     /// Head roll stops at ±15°, a physical stop that damage may follow past: a target past it is
-    /// clamped to it and reported, and the joints either side keep the actuator's travel.
+    /// clamped to it and reported, and the joints either side keep their own range.
     #[test]
     fn head_roll_is_clamped_at_its_stop() {
         let mut s = safety();
@@ -808,11 +809,6 @@ mod tests {
         let ranges = target_ranges();
         let roll = JOINT_NAMES.iter().position(|n| *n == "head_roll").unwrap();
         assert_eq!(ranges[roll], (-HEAD_ROLL_STOP, HEAD_ROLL_STOP));
-        for (i, range) in ranges.iter().enumerate() {
-            if i != roll {
-                assert_eq!(*range, (ACTUATOR_MIN, ACTUATOR_MAX), "{}", JOINT_NAMES[i]);
-            }
-        }
     }
 
     /// With the measured travel in, every joint's range sits the margin inside it, never past
@@ -829,7 +825,11 @@ mod tests {
             }
             let want_min = (lo + STOP_MARGIN_DEG).to_radians().max(ACTUATOR_MIN);
             let want_max = (hi - STOP_MARGIN_DEG).to_radians().min(ACTUATOR_MAX);
-            assert!((min - want_min).abs() < 1e-12 && (max - want_max).abs() < 1e-12, "{}", JOINT_NAMES[j]);
+            assert!(
+                (min - want_min).abs() < 1e-12 && (max - want_max).abs() < 1e-12,
+                "{}",
+                JOINT_NAMES[j]
+            );
             assert!(min < max, "{}", JOINT_NAMES[j]);
         }
     }
@@ -841,7 +841,11 @@ mod tests {
         let ranges = target_ranges();
         for (j, &(min, max)) in ranges.iter().enumerate() {
             let home = DEFAULT_POSITION[j];
-            assert!(min <= home && home <= max, "{} home {home} outside {min}..{max}", JOINT_NAMES[j]);
+            assert!(
+                min <= home && home <= max,
+                "{} home {home} outside {min}..{max}",
+                JOINT_NAMES[j]
+            );
         }
     }
 

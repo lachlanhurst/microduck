@@ -153,36 +153,37 @@ pub fn homing_offset(id: u8) -> i32 {
 /// something, either way, measured by hand with every J288 limp (dukki `hardware.md` section 12,
 /// `hardware/calibration/joint_travel.json`).
 ///
-/// In the frame `[bus.bridge_zero]` defines: these were measured against zeros judged by eye on
-/// 21/11/2026, which are the zeros a `bridge_zero` from that run holds. Restate both together
-/// from the calibration jig; a travel table in one frame and zeros in another puts every stop in
-/// the wrong place.
+/// In the frame `[bus.bridge_zero]` defines: measured against zeros judged by eye on 21/11/2026,
+/// then restated against the zeros the calibration jig gave the same day (dukki
+/// `hardware/calibration/bridge_zero.toml`). Recalibrate both together; a travel table in one
+/// frame and zeros in another puts every stop in the wrong place.
 ///
 /// Two uses: [`crate::safety::target_ranges`] keeps targets [`STOP_MARGIN_DEG`] inside it, and
 /// [`crate::bridge`] uses its middle to decide which turn a servo is on.
 pub const JOINT_TRAVEL_DEG: [(f64, f64); NUM_JOINTS] = [
-    (-47.7, 40.4),   // left_hip_yaw
-    (-21.8, 25.6),   // left_hip_roll
-    (-214.2, 96.2),  // left_hip_pitch
-    (-123.3, 82.0),  // left_knee
-    (-77.5, 72.2),   // left_ankle
-    (-185.0, 0.1),   // neck_pitch
-    (-96.2, 85.0),   // head_pitch
-    (-176.6, 168.9), // head_yaw
-    (-19.0, 22.3),   // head_roll
-    (-0.5, 33.7),    // mouth
-    (-36.5, 45.6),   // right_hip_yaw
-    (-26.5, 23.2),   // right_hip_roll
-    (-96.2, 186.0),  // right_hip_pitch
-    (-76.2, 127.5),  // right_knee
-    (-73.9, 76.0),   // right_ankle
+    (-42.5, 45.5),    // left_hip_yaw
+    (-20.6, 26.8),    // left_hip_roll
+    (-229.9, 80.5),   // left_hip_pitch
+    (-119.3, 86.0),   // left_knee
+    (-79.9, 69.8),    // left_ankle
+    (-150.0, 35.2),   // neck_pitch
+    (-82.9, 98.3),    // head_pitch
+    (-177.2, 168.3),  // head_yaw
+    (-20.9, 20.4),    // head_roll
+    (-9.4, 24.9),     // mouth
+    (-35.7, 46.5),    // right_hip_yaw
+    (-25.4, 24.3),    // right_hip_roll
+    (-81.7, 200.5),   // right_hip_pitch
+    (-85.9, 117.8),   // right_knee
+    (-73.4, 76.5),    // right_ankle
 ];
 
 /// Whether [`JOINT_TRAVEL_DEG`] is against the calibration jig's zeros, and so true enough to
-/// clamp targets with. Until it is, [`crate::safety::target_ranges`] leaves it out: against the
-/// eyeballed zeros the neck's travel ends below the home pose's +20°, because the neck rested on
-/// its upper stop when its zero was taken, and clamping there would hold the head down.
-pub const JOINT_TRAVEL_AT_JIG_ZEROS: bool = false;
+/// clamp targets with. While it was against the eyeballed zeros it was left out of
+/// [`crate::safety::target_ranges`]: there the neck's travel ended below the home pose's +20°,
+/// because the neck rested on its upper stop when its zero was taken. Restated against the jig's
+/// zeros 21/11/2026.
+pub const JOINT_TRAVEL_AT_JIG_ZEROS: bool = true;
 
 /// How far inside [`JOINT_TRAVEL_DEG`] targets are held. The travel ends are where a joint
 /// first touched something under a hand, so a servo driven exactly there would press on it.
