@@ -1733,6 +1733,10 @@ impl RestRamp {
     /// This tick's target: along the ramp, then the rest pose itself for the hold.
     fn target(&self, now: Instant) -> [f64; NUM_JOINTS] {
         let t = (now.duration_since(self.since).as_secs_f64() / REST_RAMP.as_secs_f64()).min(1.0);
+        if t >= 1.0 {
+            // The pose itself, not `from + (rest - from) * 1.0`, which rounds off it.
+            return duck_control::REST_POSITION;
+        }
         let mut target = [0.0; NUM_JOINTS];
         for (i, slot) in target.iter_mut().enumerate() {
             *slot = self.from[i] + (duck_control::REST_POSITION[i] - self.from[i]) * t;

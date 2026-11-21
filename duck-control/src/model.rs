@@ -52,29 +52,36 @@ pub const DEFAULT_POSITION: [f64; NUM_JOINTS] = [
     -0.4530, // right_ankle
 ];
 
-/// Rest pose: where a seated robot settles with its torque off. Recorded on graphite-bang
-/// sitting stably untorqued (2026-10-03), averaged over a second of samples.
+/// Rest pose: where a seated robot settles with its torque off. Dukki's, recorded 21/11/2026
+/// sitting on folded legs, settled with every J288 braked (`Stop`, what torque off is on the
+/// bridge), averaged over a second of samples against the calibration jig's zeros. It replaced
+/// the alpha's (Pollen's graphite-bang, 03/10/2026), whose neck (+55°) and right hip roll (−32°)
+/// lie past Dukki's stops.
 ///
 /// The shutdown eases the joints here from the policy's seat before cutting torque. The seat
 /// the sitstand network holds is not where the robot comes to rest once nothing holds it, so
 /// cutting torque straight from the seat let the robot sag forward. Arriving here first, it
 /// is already where it would fall to.
+///
+/// The hip rolls, the right knee and the mouth rest on or near their stops, so the safety clamp
+/// holds those targets up to 3.5° short of them during the ramp; they settle the rest of the way
+/// when torque goes.
 pub const REST_POSITION: [f64; NUM_JOINTS] = [
-    0.3129,  // left_hip_yaw
-    0.4050,  // left_hip_roll
-    -0.2338, // left_hip_pitch
-    1.5493,  // left_knee
-    0.5522,  // left_ankle
-    0.9572,  // neck_pitch
-    1.4787,  // head_pitch
-    -0.0129, // head_yaw
-    -0.0522, // head_roll
-    -0.0121, // mouth
-    0.0353,  // right_hip_yaw
-    -0.5660, // right_hip_roll
-    0.2853,  // right_hip_pitch
-    -1.4696, // right_knee
-    -0.4096, // right_ankle
+    0.1525,  // left_hip_yaw
+    0.4716,  // left_hip_roll
+    -0.3759, // left_hip_pitch
+    1.4410,  // left_knee
+    0.5450,  // left_ankle
+    0.5481,  // neck_pitch
+    0.6537,  // head_pitch
+    0.0046,  // head_yaw
+    0.0004,  // head_roll
+    -0.1370, // mouth
+    0.0946,  // right_hip_yaw
+    -0.4249, // right_hip_roll
+    0.3280,  // right_hip_pitch
+    -1.5061, // right_knee
+    -0.4390, // right_ankle
 ];
 
 /// Mouth travel, radians: closed and fully open. The alpha reuses the v1.6 range,
@@ -161,21 +168,21 @@ pub fn homing_offset(id: u8) -> i32 {
 /// Two uses: [`crate::safety::target_ranges`] keeps targets [`STOP_MARGIN_DEG`] inside it, and
 /// [`crate::bridge`] uses its middle to decide which turn a servo is on.
 pub const JOINT_TRAVEL_DEG: [(f64, f64); NUM_JOINTS] = [
-    (-42.5, 45.5),    // left_hip_yaw
-    (-20.6, 26.8),    // left_hip_roll
-    (-229.9, 80.5),   // left_hip_pitch
-    (-119.3, 86.0),   // left_knee
-    (-79.9, 69.8),    // left_ankle
-    (-150.0, 35.2),   // neck_pitch
-    (-82.9, 98.3),    // head_pitch
-    (-177.2, 168.3),  // head_yaw
-    (-20.9, 20.4),    // head_roll
-    (-9.4, 24.9),     // mouth
-    (-35.7, 46.5),    // right_hip_yaw
-    (-25.4, 24.3),    // right_hip_roll
-    (-81.7, 200.5),   // right_hip_pitch
-    (-85.9, 117.8),   // right_knee
-    (-73.4, 76.5),    // right_ankle
+    (-42.5, 45.5),   // left_hip_yaw
+    (-20.6, 26.8),   // left_hip_roll
+    (-229.9, 80.5),  // left_hip_pitch
+    (-119.3, 86.0),  // left_knee
+    (-79.9, 69.8),   // left_ankle
+    (-150.0, 35.2),  // neck_pitch
+    (-82.9, 98.3),   // head_pitch
+    (-177.2, 168.3), // head_yaw
+    (-20.9, 20.4),   // head_roll
+    (-9.4, 24.9),    // mouth
+    (-35.7, 46.5),   // right_hip_yaw
+    (-25.4, 24.3),   // right_hip_roll
+    (-81.7, 200.5),  // right_hip_pitch
+    (-85.9, 117.8),  // right_knee
+    (-73.4, 76.5),   // right_ankle
 ];
 
 /// Whether [`JOINT_TRAVEL_DEG`] is against the calibration jig's zeros, and so true enough to
@@ -248,7 +255,12 @@ mod tests {
     fn every_joint_travels_less_than_a_turn() {
         for (j, (lo, hi)) in JOINT_TRAVEL_DEG.iter().enumerate() {
             assert!(lo < hi, "{}", JOINT_NAMES[j]);
-            assert!(hi - lo < 355.0, "{} travels {} degrees", JOINT_NAMES[j], hi - lo);
+            assert!(
+                hi - lo < 355.0,
+                "{} travels {} degrees",
+                JOINT_NAMES[j],
+                hi - lo
+            );
             assert!((travel_centre(j).to_degrees() - (lo + hi) / 2.0).abs() < 1e-9);
         }
     }
