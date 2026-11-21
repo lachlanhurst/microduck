@@ -849,6 +849,20 @@ mod tests {
         }
     }
 
+    /// Closed and fully open must both lie inside the mouth's stops, or every tick of an open
+    /// (or closed) mouth is clamped and reported.
+    #[test]
+    fn the_mouth_range_lies_inside_its_stops() {
+        let mouth = JOINT_NAMES.iter().position(|n| *n == "mouth").unwrap();
+        let (min, max) = target_ranges()[mouth];
+        for target in [crate::model::MOUTH_CLOSED, crate::model::MOUTH_OPEN] {
+            assert!(
+                min <= target && target <= max,
+                "{target} outside {min}..{max}"
+            );
+        }
+    }
+
     /// An ordinary tick must pass through untouched, or the clamp is silently mangling
     /// normal operation and every other test here proves nothing.
     #[test]

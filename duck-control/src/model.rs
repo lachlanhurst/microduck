@@ -84,13 +84,16 @@ pub const REST_POSITION: [f64; NUM_JOINTS] = [
     -0.4390, // right_ankle
 ];
 
-/// Mouth travel, radians: closed and fully open. The alpha reuses the v1.6 range,
-/// −5°..+30°, from `microduck_runtime`'s `variant.rs`.
+/// Mouth travel, radians: closed and fully open. Closed is the alpha's −5° (the v1.6 range,
+/// from `microduck_runtime`'s `variant.rs`), which Dukki's calibration puts 3° off the closed
+/// stop. Open is Dukki's own, +21°: its jaw travels to +24.9° ([`JOINT_TRAVEL_DEG`]), and the
+/// safety clamp holds targets [`STOP_MARGIN_DEG`] inside that, at +21.9°. The alpha's +30°
+/// left every opening past about 77% clamped to the same angle.
 ///
 /// The mouth is not part of any policy — every alpha network is 14 actions with this joint
 /// skipped — so these two numbers and [`mouth_target`] are the whole of mouth control.
 pub const MOUTH_CLOSED: f64 = -5.0 * std::f64::consts::PI / 180.0;
-pub const MOUTH_OPEN: f64 = 30.0 * std::f64::consts::PI / 180.0;
+pub const MOUTH_OPEN: f64 = 21.0 * std::f64::consts::PI / 180.0;
 
 /// Joint angle for a mouth opening fraction. 0 is closed, 1 is fully open; anything outside
 /// is clamped rather than fed to a servo as an out-of-travel target.
@@ -373,12 +376,12 @@ mod tests {
         assert_eq!(battery_percent(-1.0), 0.0);
     }
 
-    /// The mouth range is the prototype's: −5° closed, +30° open. A fraction outside 0..1
-    /// (or a NaN from a broken client) must clamp rather than command a servo past travel.
+    /// The mouth range: −5° closed, +21° open. A fraction outside 0..1 (or a NaN from a broken
+    /// client) must clamp rather than command a servo past travel.
     #[test]
-    fn mouth_target_spans_the_prototype_range() {
+    fn mouth_target_spans_dukkis_range() {
         assert!((mouth_target(0.0) - (-5.0f64.to_radians())).abs() < 1e-12);
-        assert!((mouth_target(1.0) - 30.0f64.to_radians()).abs() < 1e-12);
+        assert!((mouth_target(1.0) - 21.0f64.to_radians()).abs() < 1e-12);
         assert_eq!(mouth_target(-3.0), mouth_target(0.0));
         assert_eq!(mouth_target(7.0), mouth_target(1.0));
         assert_eq!(mouth_target(f64::NAN), mouth_target(0.0));
