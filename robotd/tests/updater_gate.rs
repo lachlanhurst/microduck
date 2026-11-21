@@ -310,9 +310,9 @@ async fn real_robotd_reports_a_mapped_battery() {
     let battery = health
         .battery
         .expect("battery must be sampled within a few seconds of the loop starting");
-    // `FakeIo` reports 7.4 V, which is the middle of the 6.6–8.2 V span.
+    // `FakeIo` reports 23.1 V, which is the middle of the 6S 21.0–25.2 V span.
     assert!(
-        (battery.volts - 7.4).abs() < 0.01,
+        (battery.volts - 23.1).abs() < 0.01,
         "expected the fake bus voltage, got {battery:?}"
     );
     assert!(

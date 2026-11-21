@@ -214,23 +214,18 @@ pub fn joint_index(name: &str) -> Option<usize> {
 
 // ── battery ──────────────────────────────────────────────────────────────────
 //
-// There is no fuel gauge and no ADC. The only measurement available is what the servos
-// report as their own supply (`crate::bus::DynamixelIo::bus_voltage`), which is the pack
-// seen through the bus — so it sags under load and recovers when the robot stands still.
-// That is why the span below is *usable-under-load*, not the cell chemistry's range.
-//
-// The span is a statement about the *rail*, and it holds because that rail is the pack: the
-// servos are fed the 2S battery, not a regulated 5 V. A servo on a bench supply reads its own
-// supply voltage like any other, so 5 V lands under `BATTERY_EMPTY_V` and maps to 0% — the
-// mapping working as defined rather than a fault to chase. Anything that regulates the servo
-// rail has to move these two constants with it.
+// Dukki's 6S LiPo (dukki hardware.md section 10). The reading is the bridge's ADC on the pack
+// when it reports one, otherwise the servos' own mean supply voltage (`crate::bridge`), so it
+// sags under load and recovers when the robot stands still. That is why the span below is
+// *usable-under-load*, not the cell chemistry's range. The alpha's 2S NP-F550 was 8.2 to 6.6 V.
 
-/// Off a full charge, under load. NP-F550, 2S Li-ion.
-pub const BATTERY_FULL_V: f64 = 8.2;
+/// Off a full charge: 4.20 V a cell.
+pub const BATTERY_FULL_V: f64 = 25.2;
 
-/// The sag floor: below this the robot starts struggling, well before the pack's own
-/// protection trips. Empty for our purposes, not empty for the cells'.
-pub const BATTERY_EMPTY_V: f64 = 6.6;
+/// Empty under load, 3.50 V a cell: the bridge's own low-battery warning starts here too
+/// (hardware.md 5.8). Below it the robot is near the end of the pack, well before the cells'
+/// own limit.
+pub const BATTERY_EMPTY_V: f64 = 21.0;
 
 /// Fraction of a pack, 0–100, for a bus voltage.
 ///
@@ -355,7 +350,7 @@ mod tests {
     fn battery_percent_spans_the_usable_range() {
         assert_eq!(battery_percent(BATTERY_FULL_V), 100.0);
         assert_eq!(battery_percent(BATTERY_EMPTY_V), 0.0);
-        assert!((battery_percent(7.4) - 50.0).abs() < 0.001);
+        assert!((battery_percent(23.1) - 50.0).abs() < 0.001);
     }
 
     /// Voltages outside the span are ordinary — a fresh pack reads over 8.2 V off the
@@ -363,8 +358,8 @@ mod tests {
     /// produce a percentage outside 0–100 for a caller to display.
     #[test]
     fn battery_percent_clamps_rather_than_extrapolating() {
-        assert_eq!(battery_percent(9.5), 100.0);
-        assert_eq!(battery_percent(5.0), 0.0);
+        assert_eq!(battery_percent(26.0), 100.0);
+        assert_eq!(battery_percent(20.0), 0.0);
     }
 
     /// A bus that did not answer arrives here as 0.0, and NaN is what a mean over an empty

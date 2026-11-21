@@ -3222,7 +3222,7 @@ async fn control_loop<T: RobotIo>(
         } else {
             0.0
         };
-        let idle_offset = idle.head;
+        let idle_offset = if policy_cfg.idle_head { idle.head } else { [0.0; 4] };
         let command = PolicyCommand {
             twist: twist_ema,
             // The chorale's sway rides on top of whatever the head was asked to do, computed

@@ -1171,6 +1171,11 @@ pub struct PolicyParams {
     pub voltage_adapt: bool,
     /// Reference voltage for `voltage_adapt` — the supply the gains were identified at.
     pub nominal_voltage: f64,
+    /// The idle look-around: after a couple of still seconds the head glances about and tilts
+    /// (`robotd`'s `idle_head`), riding on the head command the policy sees. Its tilt reaches
+    /// about ±0.34 rad of head roll, past the ±0.24 Dukki's policies are trained to be asked
+    /// for, so a Dukki turns it off until they are.
+    pub idle_head: bool,
 }
 
 /// The literal that disables an optional policy slot, per the prototype's `--x-policy None`.
@@ -1733,6 +1738,7 @@ pub struct ResolvedPolicy {
     pub skills: Vec<SkillDef>,
     pub voltage_adapt: bool,
     pub nominal_voltage: f64,
+    pub idle_head: bool,
 }
 
 impl ResolvedPolicy {
@@ -1945,6 +1951,7 @@ impl PolicyParams {
             sitstand_ramp_s: seat.map_or(DEFAULT_SITSTAND_RAMP_S, |t| t.ramp_s),
             skills,
             voltage_adapt: self.voltage_adapt,
+            idle_head: self.idle_head,
             nominal_voltage: self.nominal_voltage,
         }
     }
@@ -2032,6 +2039,7 @@ impl Default for PolicyParams {
             skills: Vec::new(),
             voltage_adapt: true,
             nominal_voltage: 7.4,
+            idle_head: true,
         }
     }
 }

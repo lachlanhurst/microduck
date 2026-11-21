@@ -276,6 +276,11 @@ pub const REGISTRY: &[Entry] = &[
         Kind::Float,
         "Reference voltage the gains were identified at",
     ),
+    entry(
+        "policy.idle_head",
+        Kind::Bool,
+        "Idle look-around when still — off on a Dukki: its tilt is past what the policies trained on",
+    ),
     // ── [safety] ─────────────────────────────────────────────────────────────
     entry(
         "safety.fall_gravity_z",

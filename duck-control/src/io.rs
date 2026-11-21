@@ -274,7 +274,7 @@ impl FakeIo {
             last_gain: None,
             imu_ready: true,
             slow: Some(SlowSensors {
-                volts: 7.4,
+                volts: 23.1, // a 6S pack half charged (model::BATTERY_FULL_V..BATTERY_EMPTY_V)
                 temps_c: [32.0; NUM_JOINTS],
             }),
             track_targets: true,
