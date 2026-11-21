@@ -1321,7 +1321,14 @@ fn open_bridge(bus: &params::Bus, attempt: u32) -> Option<duck_control::bridge::
     let config = duck_control::bridge::BridgeConfig {
         kp_per_gain: bus.bridge_kp_per_gain,
         kd: bus.bridge_kd,
+        zero_counts: bus.bridge_zero.map(|z| z.counts()),
     };
+    if loud && bus.bridge_zero.is_none() {
+        tracing::error!(
+            "no [bus.bridge_zero] in robotd.toml: joints read in the servos' own frame, so poses, \
+             policies and joint stops mean nothing; calibrate in the jig before driving"
+        );
+    }
     match duck_control::bridge::BridgeIo::open(&bus.port, bus.bridge_baud, config) {
         Ok(io) => Some(io),
         Err(e) => {

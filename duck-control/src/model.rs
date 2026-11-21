@@ -149,6 +149,53 @@ pub fn homing_offset(id: u8) -> i32 {
     }
 }
 
+/// Dukki's mechanical travel, degrees, indexed as [`JOINT_NAMES`]: where each joint first meets
+/// something, either way, measured by hand with every J288 limp (dukki `hardware.md` section 12,
+/// `hardware/calibration/joint_travel.json`).
+///
+/// In the frame `[bus.bridge_zero]` defines: these were measured against zeros judged by eye on
+/// 21/11/2026, which are the zeros a `bridge_zero` from that run holds. Restate both together
+/// from the calibration jig; a travel table in one frame and zeros in another puts every stop in
+/// the wrong place.
+///
+/// Two uses: [`crate::safety::target_ranges`] keeps targets [`STOP_MARGIN_DEG`] inside it, and
+/// [`crate::bridge`] uses its middle to decide which turn a servo is on.
+pub const JOINT_TRAVEL_DEG: [(f64, f64); NUM_JOINTS] = [
+    (-47.7, 40.4),   // left_hip_yaw
+    (-21.8, 25.6),   // left_hip_roll
+    (-214.2, 96.2),  // left_hip_pitch
+    (-123.3, 82.0),  // left_knee
+    (-77.5, 72.2),   // left_ankle
+    (-185.0, 0.1),   // neck_pitch
+    (-96.2, 85.0),   // head_pitch
+    (-176.6, 168.9), // head_yaw
+    (-19.0, 22.3),   // head_roll
+    (-0.5, 33.7),    // mouth
+    (-36.5, 45.6),   // right_hip_yaw
+    (-26.5, 23.2),   // right_hip_roll
+    (-96.2, 186.0),  // right_hip_pitch
+    (-76.2, 127.5),  // right_knee
+    (-73.9, 76.0),   // right_ankle
+];
+
+/// Whether [`JOINT_TRAVEL_DEG`] is against the calibration jig's zeros, and so true enough to
+/// clamp targets with. Until it is, [`crate::safety::target_ranges`] leaves it out: against the
+/// eyeballed zeros the neck's travel ends below the home pose's +20°, because the neck rested on
+/// its upper stop when its zero was taken, and clamping there would hold the head down.
+pub const JOINT_TRAVEL_AT_JIG_ZEROS: bool = false;
+
+/// How far inside [`JOINT_TRAVEL_DEG`] targets are held. The travel ends are where a joint
+/// first touched something under a hand, so a servo driven exactly there would press on it.
+pub const STOP_MARGIN_DEG: f64 = 3.0;
+
+/// The middle of a joint's travel, radians: the centre of the one turn a servo's position is
+/// read in ([`crate::bridge`]). Every joint's travel is under a turn, so the turn that holds it
+/// is the one centred here.
+pub fn travel_centre(joint: usize) -> f64 {
+    let (lo, hi) = JOINT_TRAVEL_DEG[joint];
+    ((lo + hi) / 2.0).to_radians()
+}
+
 /// Index of a joint by name. Linear scan over 15 entries, used at startup and in tests.
 pub fn joint_index(name: &str) -> Option<usize> {
     JOINT_NAMES.iter().position(|n| *n == name)
@@ -193,6 +240,17 @@ pub fn battery_percent(volts: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reading a servo in the one turn centred on its travel only works if the travel fits in a
+    /// turn, with room to tell its two ends apart.
+    #[test]
+    fn every_joint_travels_less_than_a_turn() {
+        for (j, (lo, hi)) in JOINT_TRAVEL_DEG.iter().enumerate() {
+            assert!(lo < hi, "{}", JOINT_NAMES[j]);
+            assert!(hi - lo < 355.0, "{} travels {} degrees", JOINT_NAMES[j], hi - lo);
+            assert!((travel_centre(j).to_degrees() - (lo + hi) / 2.0).abs() < 1e-9);
+        }
+    }
 
     /// The three tables are indexed by the same integer everywhere in the crate. If they
     /// ever diverge in length, every lookup silently reads the wrong joint.

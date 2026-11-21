@@ -136,6 +136,11 @@ pub const REGISTRY: &[Entry] = &[
         Kind::Float,
         "J288 kd (N·m·s/rad) on every driven joint",
     ),
+    entry(
+        "bus.bridge_zero",
+        Kind::Record("left_hip_yaw = 0\nleft_hip_roll = 0\nleft_hip_pitch = 0\nleft_knee = 0\nleft_ankle = 0\nneck_pitch = 0\nhead_pitch = 0\nhead_yaw = 0\nhead_roll = 0\nmouth = 0\nright_hip_yaw = 0\nright_hip_roll = 0\nright_hip_pitch = 0\nright_knee = 0\nright_ankle = 0"),
+        "This robot's joint zeros in J288 encoder counts — the calibration jig writes them; absent, joints read in the servos' own frame",
+    ),
     // ── [control] ────────────────────────────────────────────────────────────
     entry("control.hz", Kind::Integer, "Control loop rate"),
     entry(

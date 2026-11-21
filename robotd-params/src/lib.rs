@@ -2096,6 +2096,60 @@ pub struct Bus {
     /// J288 kd, N·m·s/rad, on every driven joint. The J288's current loop cancels back-EMF, so
     /// this and friction are all the damping a joint has.
     pub bridge_kd: f64,
+    /// This robot's joint zeros: each J288's output encoder reading, in counts (8192 a turn),
+    /// with its joint at the model's zero. Written by the calibration (dukki's
+    /// `scripts/joint_scope`, with the robot in the calibration jig), not typed. Absent, the
+    /// bridge reports every servo in its own frame, which nothing that drives the robot can use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge_zero: Option<BridgeZero>,
+}
+
+/// One encoder count per joint, by joint name, so a hand edit cannot shift the table along by
+/// one. Every joint must be present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeZero {
+    pub left_hip_yaw: u16,
+    pub left_hip_roll: u16,
+    pub left_hip_pitch: u16,
+    pub left_knee: u16,
+    pub left_ankle: u16,
+    pub neck_pitch: u16,
+    pub head_pitch: u16,
+    pub head_yaw: u16,
+    pub head_roll: u16,
+    pub mouth: u16,
+    pub right_hip_yaw: u16,
+    pub right_hip_roll: u16,
+    pub right_hip_pitch: u16,
+    pub right_knee: u16,
+    pub right_ankle: u16,
+}
+
+/// Output encoder counts in a J288 turn: the bound on every [`BridgeZero`] count.
+pub const BRIDGE_ZERO_COUNTS: u16 = 8192;
+
+impl BridgeZero {
+    /// The counts in the firmware's joint order (`duck_ipc_proto::JOINT_NAMES`).
+    pub fn counts(&self) -> [u16; 15] {
+        [
+            self.left_hip_yaw,
+            self.left_hip_roll,
+            self.left_hip_pitch,
+            self.left_knee,
+            self.left_ankle,
+            self.neck_pitch,
+            self.head_pitch,
+            self.head_yaw,
+            self.head_roll,
+            self.mouth,
+            self.right_hip_yaw,
+            self.right_hip_roll,
+            self.right_hip_pitch,
+            self.right_knee,
+            self.right_ankle,
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2179,6 +2233,7 @@ impl Default for Bus {
             bridge_baud: 2_000_000,
             bridge_kp_per_gain: 0.01,
             bridge_kd: 0.05,
+            bridge_zero: None,
         }
     }
 }
@@ -2228,6 +2283,12 @@ pub enum ParamsError {
         path: String,
         key: &'static str,
         got: f64,
+    },
+    #[error("{path}: bus.bridge_zero.{joint} must be an encoder count below 8192, got {got}")]
+    BridgeZero {
+        path: String,
+        joint: &'static str,
+        got: u16,
     },
     #[error("{path}: control.hz must be between 1 and 1000, got {got}")]
     Rate { path: String, got: u32 },
@@ -2343,6 +2404,17 @@ impl Params {
                     key,
                     got,
                 });
+            }
+        }
+        if let Some(zero) = &self.bus.bridge_zero {
+            for (joint, got) in duck_ipc_proto::JOINT_NAMES.iter().zip(zero.counts()) {
+                if got >= BRIDGE_ZERO_COUNTS {
+                    return Err(ParamsError::BridgeZero {
+                        path: path.display().to_string(),
+                        joint,
+                        got,
+                    });
+                }
             }
         }
         if self.control.hz == 0 || self.control.hz > 1000 {
@@ -3522,6 +3594,42 @@ mod tests {
             width * height * fps * 4 < w * h * f,
             "{width}x{height}@{fps} is not materially cheaper than the default {w}x{h}@{f}"
         );
+    }
+
+    fn bridge_zero_toml(skip: Option<&str>, value_of: impl Fn(usize) -> u32) -> String {
+        let mut out = String::from("[bus.bridge_zero]\n");
+        for (i, name) in duck_ipc_proto::JOINT_NAMES.iter().enumerate() {
+            if Some(*name) != skip {
+                out.push_str(&format!("{name} = {}\n", value_of(i)));
+            }
+        }
+        out
+    }
+
+    /// The zeros are keyed by joint name and come out in the firmware's joint order, so the
+    /// bridge applies each one to its own servo. Absent stays absent.
+    #[test]
+    fn bridge_zeros_come_out_in_joint_order() {
+        assert_eq!(Params::default().bus.bridge_zero, None);
+        let parsed: Params = toml::from_str(&bridge_zero_toml(None, |i| 100 + i as u32)).unwrap();
+        let counts = parsed.bus.bridge_zero.expect("written").counts();
+        assert_eq!(counts, std::array::from_fn(|i| 100 + i as u16));
+    }
+
+    /// A table missing a joint, or with a count past a turn, is refused rather than run on: a
+    /// wrong zero drives a joint to the wrong place with nothing to say why.
+    #[test]
+    fn a_partial_or_out_of_range_bridge_zero_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), &bridge_zero_toml(Some("head_yaw"), |_| 10));
+        assert!(Params::load(&path, true).is_err(), "missing head_yaw");
+
+        let path = write(dir.path(), &bridge_zero_toml(None, |i| if i == 3 { 8192 } else { 10 }));
+        let error = Params::load(&path, true).expect_err("refused").to_string();
+        assert!(error.contains("bus.bridge_zero.left_knee"), "{error}");
+
+        let path = write(dir.path(), &bridge_zero_toml(None, |i| if i == 3 { 8191 } else { 10 }));
+        assert!(Params::load(&path, true).is_ok());
     }
 
     /// A `_min` written as a magnitude would turn full stick back into walking forward. Refused,

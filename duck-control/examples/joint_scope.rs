@@ -67,7 +67,11 @@ fn parse_args() -> Args {
         };
         match flag.as_str() {
             "--port" => a.port = value("--port"),
-            "--baud" => a.baud = value("--baud").parse().unwrap_or_else(|_| usage("bad --baud")),
+            "--baud" => {
+                a.baud = value("--baud")
+                    .parse()
+                    .unwrap_or_else(|_| usage("bad --baud"))
+            }
             "--listen" => a.listen = value("--listen"),
             "--hz" => a.hz = value("--hz").parse().unwrap_or_else(|_| usage("bad --hz")),
             "--kd" => a.kd = value("--kd").parse().unwrap_or_else(|_| usage("bad --kd")),
@@ -146,6 +150,9 @@ fn main() {
     let config = BridgeConfig {
         kp_per_gain: 0.0,
         kd: args.kd,
+        // The servos' own frame: the stream carries raw positions and encoder counts, and the
+        // calibration it feeds is what produces the zeros.
+        zero_counts: None,
     };
     let mut io = match BridgeIo::open(&args.port, args.baud, config) {
         Ok(io) => io,
@@ -212,7 +219,10 @@ fn main() {
                 }
             }
         }
-        println!("every servo limp (FOC, kp 0, kd {}); move the joints by hand", args.kd);
+        println!(
+            "every servo limp (FOC, kp 0, kd {}); move the joints by hand",
+            args.kd
+        );
     } else {
         println!("every servo braked (Stop)");
     }

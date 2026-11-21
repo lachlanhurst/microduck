@@ -10,9 +10,22 @@
 //! choice alone.
 //!
 //! Each J288's ID is its joint's index (`motor-setup.md`), so servo slot `j` in the protocol is
-//! joint `j` in [`crate::model::JOINT_NAMES`]. Positions pass through unchanged: they are the
-//! J288's multi-turn position relative to where it powered up, and joint zeros and directions
-//! are a calibration step that does not exist yet.
+//! joint `j` in [`crate::model::JOINT_NAMES`].
+//!
+//! Joint angles. The bridge reports each J288's multi-turn position, which the servo seeds from
+//! its absolute output encoder at power-up, so it reads that encoder's angle within the first
+//! turn and follows motion smoothly from there. With [`BridgeConfig::zero_counts`] set (robotd's
+//! `[bus.bridge_zero]`, from the calibration jig), a joint's angle is that position less the
+//! joint's zero and a whole number of turns. The turns are chosen the first time each servo is
+//! read, so the angle lands in the one turn centred on the joint's measured travel
+//! ([`crate::model::travel_centre`]), and held from then on: a joint moved across the turn's
+//! edge while running keeps counting rather than jumping a turn. Targets go back the same way.
+//! Every joint turns the way the model's does (checked on Dukki 21/11/2026), so there is no
+//! sign. Without zeros, positions pass through unchanged, in the servos' own frame.
+//!
+//! A servo that loses power while the bridge runs seeds its position afresh when it returns,
+//! which can be a turn away from the count the turns were chosen against. Nothing here notices
+//! that yet; it would show as a joint reading a turn out.
 
 use std::io::{ErrorKind, Read, Write};
 use std::time::{Duration, Instant};
@@ -23,7 +36,7 @@ use crate::imu::SflpDecoder;
 use crate::io::{
     HostState, ImuStale, IoError, JointTargets, Result, RobotIo, Sensors, SlowSensors,
 };
-use crate::model::{JOINT_IDS, NUM_JOINTS};
+use crate::model::{JOINT_IDS, JOINT_NAMES, NUM_JOINTS, travel_centre};
 
 /// What the bridge firmware runs today (`link.rs` there). 4 Mbps waits on a scope check of the
 /// neck harness.
@@ -58,6 +71,9 @@ pub struct BridgeConfig {
     pub kp_per_gain: f64,
     /// J288 kd, N·m·s/rad, on every joint driven in FOC.
     pub kd: f64,
+    /// Each joint's zero as its output encoder reads it, counts (8192 a turn), indexed as
+    /// [`crate::model::JOINT_NAMES`]. `None` passes positions through in the servos' own frame.
+    pub zero_counts: Option<[u16; NUM_JOINTS]>,
 }
 
 impl Default for BridgeConfig {
@@ -65,6 +81,7 @@ impl Default for BridgeConfig {
         Self {
             kp_per_gain: 0.01,
             kd: 0.05,
+            zero_counts: None,
         }
     }
 }
@@ -96,6 +113,20 @@ pub struct BridgeIo<T> {
     imu: SflpDecoder,
     stale_imu: ImuStale,
     last_rotation_samples: Option<u32>,
+    /// What to subtract from each servo's position to get its joint angle: the joint's zero
+    /// plus whole turns, chosen the first time the servo is read. All zero without
+    /// calibration.
+    offsets: [Option<f64>; NUM_JOINTS],
+}
+
+/// Output encoder counts in a turn.
+pub const ENCODER_COUNTS: u16 = 8192;
+
+/// The offset that puts a servo's `position` into the turn centred on `centre`, for a joint
+/// whose zero is `zero` (both radians).
+fn turn_offset(zero: f64, centre: f64, position: f64) -> f64 {
+    let turns = ((position - zero - centre) / std::f64::consts::TAU).round();
+    zero + turns * std::f64::consts::TAU
 }
 
 /// The bridge on a serial port: what the robot runs.
@@ -137,6 +168,10 @@ impl<T: Read + Write> BridgeIo<T> {
             imu: SflpDecoder::default(),
             stale_imu: ImuStale::default(),
             last_rotation_samples: None,
+            offsets: match config.zero_counts {
+                None => [Some(0.0); NUM_JOINTS],
+                Some(_) => [None; NUM_JOINTS],
+            },
         };
         io.info = io.request_info()?;
         Ok(io)
@@ -300,6 +335,27 @@ impl<T: Read + Write> BridgeIo<T> {
         self.send(&proto::HostStatus { state, cpu_temp_dc })
     }
 
+    /// A servo's position as its joint's angle, choosing the joint's turn the first time.
+    fn joint_angle(&mut self, joint: usize, position: f64) -> f64 {
+        if let Some(offset) = self.offsets[joint] {
+            return position - offset;
+        }
+        let zero = self.config.zero_counts.map_or(0.0, |z| {
+            z[joint] as f64 * std::f64::consts::TAU / ENCODER_COUNTS as f64
+        });
+        let offset = turn_offset(zero, travel_centre(joint), position);
+        tracing::info!(
+            joint = JOINT_NAMES[joint],
+            position,
+            zero,
+            offset,
+            angle = position - offset,
+            "joint turn chosen"
+        );
+        self.offsets[joint] = Some(offset);
+        position - offset
+    }
+
     /// Fills every servo from the current gains and torque state.
     fn fill_command(&mut self) {
         let drive = self.torque_on && self.targets_set;
@@ -334,7 +390,17 @@ impl<T: Read + Write> BridgeIo<T> {
         let Some((sent, at)) = &self.last_full else {
             return false;
         };
-        let rest = |s: &proto::ServoCommand| (s.mode, s.action, s.action_id, s.velocity, s.kp, s.kd, s.torque);
+        let rest = |s: &proto::ServoCommand| {
+            (
+                s.mode,
+                s.action,
+                s.action_id,
+                s.velocity,
+                s.kp,
+                s.kd,
+                s.torque,
+            )
+        };
         at.elapsed() < FULL_COMMAND_EVERY
             && sent
                 .servos
@@ -355,16 +421,30 @@ impl<T: Read + Write> BridgeIo<T> {
         self.send(&targets)
     }
 
-    fn set_targets(&mut self, positions: &[f64; NUM_JOINTS]) {
-        for (servo, &p) in self.command.servos.iter_mut().zip(positions) {
-            servo.position = p as f32;
+    /// Joint angles to servo positions. Refused until every joint has been read once, since
+    /// before that a joint's turn is not known and its target could be a turn out.
+    fn set_targets(&mut self, positions: &[f64; NUM_JOINTS]) -> Result<()> {
+        let mut servo_positions = [0.0f32; NUM_JOINTS];
+        for (j, &p) in positions.iter().enumerate() {
+            let offset = self.offsets[j].ok_or_else(|| {
+                IoError::Bus(format!(
+                    "no target for {} before it has been read: its turn is not known",
+                    JOINT_NAMES[j]
+                ))
+            })?;
+            servo_positions[j] = (p + offset) as f32;
+        }
+        for (servo, p) in self.command.servos.iter_mut().zip(servo_positions) {
+            servo.position = p;
         }
         self.targets_set = true;
+        Ok(())
     }
 
     /// Present positions from a fresh sample.
     pub fn present_positions(&mut self) -> Result<[f64; NUM_JOINTS]> {
-        Ok(sensors_from(&self.sample()?)?.positions)
+        let sample = self.sample()?;
+        Ok(self.sensors_from(&sample)?.positions)
     }
 
     /// Ramp every joint from where it is now to `target`, linearly. The same contract as
@@ -391,8 +471,20 @@ impl<T: Read + Write> BridgeIo<T> {
     }
 }
 
-/// The servos in [`Sensors`]' shape, or why not. The IMU is the caller's.
-fn sensors_from(sample: &proto::Sample) -> Result<Sensors> {
+impl<T: Read + Write> BridgeIo<T> {
+    /// The servos in [`Sensors`]' shape, as joint angles, or why not. The IMU is the caller's.
+    fn sensors_from(&mut self, sample: &proto::Sample) -> Result<Sensors> {
+        let mut sensors = check_servos(sample)?;
+        for j in 0..NUM_JOINTS {
+            sensors.positions[j] = self.joint_angle(j, sensors.positions[j]);
+        }
+        Ok(sensors)
+    }
+}
+
+/// The servos in [`Sensors`]' shape, in the servos' own frame, or why not. The IMU is the
+/// caller's.
+fn check_servos(sample: &proto::Sample) -> Result<Sensors> {
     let present = sample
         .servos
         .iter()
@@ -424,7 +516,7 @@ fn sensors_from(sample: &proto::Sample) -> Result<Sensors> {
 impl<T: Read + Write> RobotIo for BridgeIo<T> {
     fn read(&mut self) -> Result<Sensors> {
         let sample = self.sample()?;
-        let mut sensors = sensors_from(&sample)?;
+        let mut sensors = self.sensors_from(&sample)?;
         // Stale by the bridge's own sample counter rather than by comparing bytes: the IMU runs
         // at 120 Hz, so at a 100 Hz tick two identical blocks are rare but not wrong, and the
         // counter says exactly whether a new fused sample arrived.
@@ -444,7 +536,7 @@ impl<T: Read + Write> RobotIo for BridgeIo<T> {
     /// second, a full state request, whose answer arrives while the tick has nothing else on
     /// the link and is kept by the next read.
     fn write(&mut self, targets: &JointTargets) -> Result<()> {
-        self.set_targets(&targets.positions);
+        self.set_targets(&targets.positions)?;
         if self.targets_suffice() {
             self.send_targets()?;
         } else {
@@ -468,7 +560,7 @@ impl<T: Read + Write> RobotIo for BridgeIo<T> {
             // Hold where the robot is: the J288 drives to whatever position the frame carries,
             // and there is no goal register left over from before as there is on an XL330.
             let here = self.present_positions()?;
-            self.set_targets(&here);
+            self.set_targets(&here)?;
         }
         self.torque_on = on;
         self.send_command()
@@ -845,13 +937,120 @@ mod tests {
         io.write(&JointTargets::new([0.5; NUM_JOINTS])).unwrap();
         assert_eq!(io.port.targets, 2);
         let last = io.port.commands.last().unwrap();
-        assert!(last.servos.iter().all(|s| s.mode == ServoMode::Foc && (s.position - 0.5).abs() < 1e-6));
+        assert!(
+            last.servos
+                .iter()
+                .all(|s| s.mode == ServoMode::Foc && (s.position - 0.5).abs() < 1e-6)
+        );
         assert!(last.servos.iter().all(|s| (s.kp - 2.0).abs() < 1e-6));
         io.set_gain(100).unwrap();
         io.write(&JointTargets::new([0.6; NUM_JOINTS])).unwrap();
-        assert_eq!(io.port.targets, 3, "the gain change went as a full command, then targets");
+        assert_eq!(
+            io.port.targets, 3,
+            "the gain change went as a full command, then targets"
+        );
         assert_eq!(io.port.commands.len(), full + 4);
-        assert!(io.port.commands.last().unwrap().servos.iter().all(|s| (s.kp - 1.0).abs() < 1e-6));
+        assert!(
+            io.port
+                .commands
+                .last()
+                .unwrap()
+                .servos
+                .iter()
+                .all(|s| (s.kp - 1.0).abs() < 1e-6)
+        );
+    }
+
+    fn open_calibrated(zero_counts: [u16; NUM_JOINTS]) -> BridgeIo<FakeBridge> {
+        let config = BridgeConfig {
+            zero_counts: Some(zero_counts),
+            ..BridgeConfig::default()
+        };
+        BridgeIo::with_transport(FakeBridge::new(), config).unwrap()
+    }
+
+    fn counts(rad: f64) -> u16 {
+        ((rad / TAU * ENCODER_COUNTS as f64).round() as i64).rem_euclid(ENCODER_COUNTS as i64)
+            as u16
+    }
+
+    use std::f64::consts::TAU;
+
+    /// With zeros, a joint reads its servo's position less its zero, and a servo a whole turn
+    /// away reads the same: the turn is chosen, not inherited from the servo's count.
+    #[test]
+    fn a_calibrated_read_is_the_position_less_the_zero() {
+        // Every joint's zero 0.25 rad below where its servo sits (FakeBridge: j * 0.1).
+        let zeros: [u16; NUM_JOINTS] = std::array::from_fn(|j| counts(j as f64 * 0.1 - 0.25));
+        let mut io = open_calibrated(zeros);
+        io.port.state.servos[3].position += TAU as f32;
+        let s = io.read().unwrap();
+        // 0.25 rad lies inside every joint's turn, so every joint reads it, joint 3 included.
+        // The tolerance is the zero's rounding to a whole count.
+        for (name, angle) in JOINT_NAMES.iter().zip(s.positions) {
+            assert!((angle - 0.25).abs() < 2e-3, "{name} read {angle}");
+        }
+    }
+
+    /// The turn a joint is read in is centred on its travel, so head yaw near either end reads
+    /// near that end rather than a turn round.
+    #[test]
+    fn the_turn_is_centred_on_the_joint_travel() {
+        let yaw = 7;
+        assert_eq!(JOINT_NAMES[yaw], "head_yaw");
+        for angle_deg in [165.0_f64, -172.0] {
+            let mut io = open_calibrated([0; NUM_JOINTS]);
+            // Zero at count 0: the servo reads the angle itself, within the encoder's turn.
+            io.port.state.servos[yaw].position = angle_deg.to_radians().rem_euclid(TAU) as f32;
+            let s = io.read().unwrap();
+            assert!(
+                (s.positions[yaw].to_degrees() - angle_deg).abs() < 0.01,
+                "{angle_deg} read {}",
+                s.positions[yaw].to_degrees()
+            );
+        }
+    }
+
+    /// Targets go back through the same offsets: holding the present pose commands exactly the
+    /// servo positions read, and a joint angle becomes that angle plus the joint's offset.
+    #[test]
+    fn calibrated_targets_map_back_to_servo_positions() {
+        let zeros: [u16; NUM_JOINTS] = std::array::from_fn(|j| counts(j as f64 * 0.1 - 0.25));
+        let mut io = open_calibrated(zeros);
+        io.port.state.servos[3].position += TAU as f32;
+        io.set_gain(200).unwrap();
+        io.set_torque(true).unwrap();
+        let held = io.port.commands.last().unwrap();
+        for (j, s) in held.servos.iter().enumerate() {
+            let servo = j as f32 * 0.1 + if j == 3 { TAU as f32 } else { 0.0 };
+            assert!(
+                (s.position - servo).abs() < 1e-4,
+                "{} held {}",
+                JOINT_NAMES[j],
+                s.position
+            );
+        }
+        io.write(&JointTargets::new([0.35; NUM_JOINTS])).unwrap();
+        let moved = io.port.commands.last().unwrap();
+        for (j, s) in moved.servos.iter().enumerate() {
+            let servo = j as f32 * 0.1 + if j == 3 { TAU as f32 } else { 0.0 };
+            assert!(
+                (s.position - (servo + 0.1)).abs() < 2e-3,
+                "{} sent {}",
+                JOINT_NAMES[j],
+                s.position
+            );
+        }
+    }
+
+    /// Before a joint has been read its turn is unknown, so a calibrated bridge refuses a target
+    /// rather than guess one that could be a turn out.
+    #[test]
+    fn a_calibrated_target_before_any_read_is_refused() {
+        let mut io = open_calibrated([0; NUM_JOINTS]);
+        assert!(io.write(&JointTargets::new([0.0; NUM_JOINTS])).is_err());
+        io.read().unwrap();
+        assert!(io.write(&JointTargets::new([0.0; NUM_JOINTS])).is_ok());
     }
 
     /// The shutdown flag follows the newest frame, so a full state frame from before the

@@ -35,7 +35,9 @@
 use std::time::Duration;
 
 use crate::io::{IoError, JointTargets, RobotIo, Sensors};
-use crate::model::{JOINT_NAMES, NUM_JOINTS};
+use crate::model::{
+    JOINT_NAMES, JOINT_TRAVEL_AT_JIG_ZEROS, JOINT_TRAVEL_DEG, NUM_JOINTS, STOP_MARGIN_DEG,
+};
 use crate::obs::Command;
 
 /// The XL330's position range: one turn, centred, from the count↔radian conversion.
@@ -61,19 +63,38 @@ pub const HEAD_ROLL_STOP: f64 = 15.0_f64.to_radians();
 /// target past one is clamped to it like any other out-of-range target.
 pub const JOINT_STOPS: [(&str, f64, f64); 1] = [("head_roll", -HEAD_ROLL_STOP, HEAD_ROLL_STOP)];
 
-/// Each joint's target range: the actuator's travel, narrowed by [`JOINT_STOPS`].
+/// Each joint's target range: the actuator's travel, narrowed to [`STOP_MARGIN_DEG`] inside
+/// Dukki's measured mechanical travel ([`JOINT_TRAVEL_DEG`]) once that is against the jig's
+/// zeros ([`JOINT_TRAVEL_AT_JIG_ZEROS`]), and narrowed again by [`JOINT_STOPS`].
+///
+/// The measured travel is in the joint frame `[bus.bridge_zero]` defines, so on a bridge with
+/// no zeros these ranges are in the servos' own frame and protect nothing; robotd says so when
+/// it opens the bridge.
 ///
 /// # Panics
 /// If a stop names a joint that is not in [`JOINT_NAMES`]: a stop that silently matched
 /// nothing would be protection nobody has.
 pub fn target_ranges() -> [(f64, f64); NUM_JOINTS] {
-    let mut ranges = [(ACTUATOR_MIN, ACTUATOR_MAX); NUM_JOINTS];
+    ranges_within(JOINT_TRAVEL_AT_JIG_ZEROS.then_some(&JOINT_TRAVEL_DEG))
+}
+
+fn ranges_within(travel: Option<&[(f64, f64); NUM_JOINTS]>) -> [(f64, f64); NUM_JOINTS] {
+    let mut ranges: [(f64, f64); NUM_JOINTS] = std::array::from_fn(|j| match travel {
+        Some(travel) => {
+            let (lo, hi) = travel[j];
+            (
+                (lo + STOP_MARGIN_DEG).to_radians().max(ACTUATOR_MIN),
+                (hi - STOP_MARGIN_DEG).to_radians().min(ACTUATOR_MAX),
+            )
+        }
+        None => (ACTUATOR_MIN, ACTUATOR_MAX),
+    });
     for (joint, min, max) in JOINT_STOPS {
         let i = JOINT_NAMES
             .iter()
             .position(|name| *name == joint)
             .unwrap_or_else(|| panic!("joint stop for unknown joint {joint}"));
-        ranges[i] = (min.max(ACTUATOR_MIN), max.min(ACTUATOR_MAX));
+        ranges[i] = (min.max(ranges[i].0), max.min(ranges[i].1));
     }
     ranges
 }
@@ -791,6 +812,36 @@ mod tests {
             if i != roll {
                 assert_eq!(*range, (ACTUATOR_MIN, ACTUATOR_MAX), "{}", JOINT_NAMES[i]);
             }
+        }
+    }
+
+    /// With the measured travel in, every joint's range sits the margin inside it, never past
+    /// the actuator's turn, and head roll keeps its tighter ±15°.
+    #[test]
+    fn travel_stops_sit_the_margin_inside_the_measured_travel() {
+        let ranges = ranges_within(Some(&JOINT_TRAVEL_DEG));
+        let roll = JOINT_NAMES.iter().position(|n| *n == "head_roll").unwrap();
+        for (j, &(min, max)) in ranges.iter().enumerate() {
+            let (lo, hi) = JOINT_TRAVEL_DEG[j];
+            if j == roll {
+                assert_eq!((min, max), (-HEAD_ROLL_STOP, HEAD_ROLL_STOP));
+                continue;
+            }
+            let want_min = (lo + STOP_MARGIN_DEG).to_radians().max(ACTUATOR_MIN);
+            let want_max = (hi - STOP_MARGIN_DEG).to_radians().min(ACTUATOR_MAX);
+            assert!((min - want_min).abs() < 1e-12 && (max - want_max).abs() < 1e-12, "{}", JOINT_NAMES[j]);
+            assert!(min < max, "{}", JOINT_NAMES[j]);
+        }
+    }
+
+    /// Once the travel is against the jig's zeros and clamps for real, the home pose every policy
+    /// starts from must lie inside it, or the robot could never reach it.
+    #[test]
+    fn the_home_pose_lies_inside_the_stops() {
+        let ranges = target_ranges();
+        for (j, &(min, max)) in ranges.iter().enumerate() {
+            let home = DEFAULT_POSITION[j];
+            assert!(min <= home && home <= max, "{} home {home} outside {min}..{max}", JOINT_NAMES[j]);
         }
     }
 
