@@ -2116,6 +2116,11 @@ pub struct Bus {
     /// designed (`SflpDecoder::DUKKI_MOUNT`), which a built robot's board sits a few degrees off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge_imu_mount: Option<ImuMount>,
+    /// The three-sample median on the trunk IMU's gyro and gravity (spike rejection, as the
+    /// runtime has always had). It holds a smoothly changing reading back by about one tick,
+    /// 20 ms at 50 Hz, on top of the chip's own latency; false hands the policy each tick's own
+    /// reading.
+    pub bridge_imu_median: bool,
 }
 
 /// A rotation as a unit quaternion, scalar first.
@@ -2267,6 +2272,7 @@ impl Default for Bus {
             bridge_kd: 0.05,
             bridge_zero: None,
             bridge_imu_mount: None,
+            bridge_imu_median: true,
         }
     }
 }

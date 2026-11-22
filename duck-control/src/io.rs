@@ -112,6 +112,21 @@ pub struct ImuStale {
     pub run: u64,
 }
 
+/// How old a read's data was, on the bus's own clocks: what the loop's latency report starts
+/// from. Every field is microseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SampleTiming {
+    /// The oldest servo reading in the sample, when the bridge built it.
+    pub servo_age_max_us: u32,
+    /// The IMU block's age when the bridge built the sample (from the chip's FIFO interrupt;
+    /// the chip's own filtering comes before that).
+    pub imu_age_us: u32,
+    /// How long the last command had been at the bridge when it built the sample.
+    pub command_age_us: u32,
+    /// From sending the sample request to having its answer, host clock.
+    pub round_trip_us: u32,
+}
+
 /// What the compute module is doing, as it tells a bus that asks: the servo bridge shows it on
 /// its display, and counts the head off a while after it stops commanding while shutting down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -194,6 +209,12 @@ pub trait RobotIo {
     /// Has the orientation filter converged? False for the first moments after startup.
     fn imu_ready(&self) -> bool {
         true
+    }
+
+    /// How old the last [`Self::read`]'s data was, for the loop's latency report. `None` from a
+    /// backend that does not know (the default).
+    fn sample_timing(&self) -> Option<SampleTiming> {
+        None
     }
 
     /// Whether the robot's side of the bus asks the compute module to shut down: the servo

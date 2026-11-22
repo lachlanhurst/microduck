@@ -148,6 +148,11 @@ pub const REGISTRY: &[Entry] = &[
         Kind::Record("w = 0.5\nx = -0.5\ny = -0.5\nz = 0.5"),
         "This robot's trunk IMU mount, chip to trunk — a calibration writes it; absent, the mount as designed",
     ),
+    entry(
+        "bus.bridge_imu_median",
+        Kind::Bool,
+        "Three-sample median on the trunk IMU's gyro and gravity (about one tick of lag)",
+    ),
     // ── [control] ────────────────────────────────────────────────────────────
     entry("control.hz", Kind::Integer, "Control loop rate"),
     entry(

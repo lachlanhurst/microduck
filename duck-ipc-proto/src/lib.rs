@@ -4110,6 +4110,26 @@ pub struct LoopState {
     pub hz: f64,
     /// Ticks whose work overran the period, cumulative.
     pub missed: u64,
+    /// This tick's latencies, when the bus reports them (the servo bridge does). Absent on a
+    /// coasted tick, a backend that does not know, and a `robotd` that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<LoopTiming>,
+}
+
+/// One tick's latencies, microseconds: how old the data the policy stepped from was, and how
+/// long the tick took from having it to sending the command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopTiming {
+    /// The oldest servo reading in the sample, when the bridge built it.
+    pub servo_age_us: u32,
+    /// The IMU block's age when the bridge built the sample.
+    pub imu_age_us: u32,
+    /// How long the previous command had been at the bridge when it built the sample.
+    pub command_age_us: u32,
+    /// Sample request to answer, host clock.
+    pub round_trip_us: u32,
+    /// From having the sample to the command written: observation, inference, filters, safety.
+    pub compute_us: u32,
 }
 
 /// Answer to [`Call::RobotModelApi`].
@@ -6446,6 +6466,7 @@ mod tests {
             control_loop: LoopState {
                 hz: 49.8,
                 missed: 0,
+                timing: None,
             },
             joints: vec![0.0; 15],
             targets: vec![0.0; 15],

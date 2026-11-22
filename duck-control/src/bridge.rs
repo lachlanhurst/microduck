@@ -34,7 +34,7 @@ use duck_bridge_proto::{self as proto, Action, FrameDecoder, Message, ServoMode}
 
 use crate::imu::SflpDecoder;
 use crate::io::{
-    HostState, ImuStale, IoError, JointTargets, Result, RobotIo, Sensors, SlowSensors,
+    HostState, ImuStale, IoError, JointTargets, Result, RobotIo, SampleTiming, Sensors, SlowSensors,
 };
 use crate::model::{JOINT_IDS, JOINT_NAMES, NUM_JOINTS, travel_centre};
 
@@ -77,6 +77,8 @@ pub struct BridgeConfig {
     /// The trunk IMU's sensor-to-trunk rotation, scalar-first. [`SflpDecoder::DUKKI_MOUNT`]
     /// unless a calibration says otherwise.
     pub imu_mount: [f64; 4],
+    /// The three-sample median on gyro and gravity ([`SflpDecoder::with_median`]). On by default.
+    pub imu_median: bool,
 }
 
 impl Default for BridgeConfig {
@@ -86,6 +88,7 @@ impl Default for BridgeConfig {
             kd: 0.05,
             zero_counts: None,
             imu_mount: SflpDecoder::DUKKI_MOUNT,
+            imu_median: true,
         }
     }
 }
@@ -111,6 +114,8 @@ pub struct BridgeIo<T> {
     state_due: Instant,
     last_state: Option<proto::State>,
     last_sample: Option<proto::Sample>,
+    /// Host-clock time from the last sample request to its answer, µs.
+    sample_round_trip_us: u32,
     /// State flags and IMU status from the newest sample or state frame, whichever came last.
     flags: u16,
     imu_status: u8,
@@ -167,9 +172,10 @@ impl<T: Read + Write> BridgeIo<T> {
             state_due: Instant::now(),
             last_state: None,
             last_sample: None,
+            sample_round_trip_us: 0,
             flags: 0,
             imu_status: proto::imu_status::STARTING,
-            imu: SflpDecoder::new(config.imu_mount),
+            imu: SflpDecoder::new(config.imu_mount).with_median(config.imu_median),
             stale_imu: ImuStale::default(),
             last_rotation_samples: None,
             offsets: match config.zero_counts {
@@ -315,6 +321,10 @@ impl<T: Read + Write> BridgeIo<T> {
         self.send(&proto::SampleRequest { host_time_us })?;
         let sample = self
             .receive::<proto::Sample>(REPLY_TIMEOUT, |s| s.request_host_time_us == host_time_us)?;
+        self.sample_round_trip_us = self
+            .host_us()
+            .saturating_sub(host_time_us)
+            .min(u32::MAX as u64) as u32;
         self.flags = sample.flags;
         self.imu_status = sample.imu.status;
         self.last_sample = Some(sample);
@@ -624,6 +634,22 @@ impl<T: Read + Write> RobotIo for BridgeIo<T> {
 
     fn imu_ready(&self) -> bool {
         self.imu.ready() && self.imu_status == proto::imu_status::RUNNING
+    }
+
+    fn sample_timing(&self) -> Option<SampleTiming> {
+        let sample = self.last_sample.as_ref()?;
+        Some(SampleTiming {
+            servo_age_max_us: sample
+                .servos
+                .iter()
+                .filter(|s| s.segment != proto::ABSENT)
+                .map(|s| u32::from(s.age_us))
+                .max()
+                .unwrap_or(0),
+            imu_age_us: sample.imu.age_us,
+            command_age_us: sample.command_age_us,
+            round_trip_us: self.sample_round_trip_us,
+        })
     }
 
     fn shutdown_requested(&self) -> bool {
@@ -963,6 +989,20 @@ mod tests {
                 .iter()
                 .all(|s| (s.kp - 1.0).abs() < 1e-6)
         );
+    }
+
+    /// The latency report carries the sample's ages: nothing before the first read, then the
+    /// oldest servo's age and the IMU block's from the frame the read took.
+    #[test]
+    fn sample_timing_comes_from_the_last_read() {
+        let mut io = open();
+        assert_eq!(io.sample_timing(), None);
+        io.port.state.servos[4].age_us = 3500;
+        io.port.state.imu.age_us = 1200;
+        io.read().unwrap();
+        let t = io.sample_timing().expect("after a read");
+        assert_eq!(t.servo_age_max_us, 3500);
+        assert_eq!(t.imu_age_us, 1200);
     }
 
     fn open_calibrated(zero_counts: [u16; NUM_JOINTS]) -> BridgeIo<FakeBridge> {

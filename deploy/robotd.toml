@@ -43,6 +43,11 @@ port = "/dev/ttyS7"
 # bridge_kp_per_gain = 0.01
 # bridge_kd = 0.05
 
+# The three-sample median on the trunk IMU's gyro and gravity: rejects a single wild block, but
+# holds a smoothly changing reading back by about one tick (20 ms at 50 Hz) on top of the chip's
+# own latency. false hands the policy each tick's own reading.
+# bridge_imu_median = true
+
 # This robot's joint zeros, a [bus.bridge_zero] table: each J288's output encoder reading in
 # counts (0 to 8191 a turn) with its joint at the model's zero, one key per joint, every joint
 # present. Written by the calibration (dukki's scripts/joint_scope, robot in the calibration jig),

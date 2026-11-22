@@ -1325,6 +1325,7 @@ fn open_bridge(bus: &params::Bus, attempt: u32) -> Option<duck_control::bridge::
         imu_mount: bus
             .bridge_imu_mount
             .map_or(duck_control::imu::SflpDecoder::DUKKI_MOUNT, |m| m.wxyz()),
+        imu_median: bus.bridge_imu_median,
     };
     if loud && bus.bridge_imu_mount.is_none() {
         tracing::warn!(
@@ -2409,10 +2410,13 @@ async fn control_loop<T: RobotIo>(
         let tick_start = Instant::now();
 
         let read_at = proto::clock::monotonic_ns();
+        // When this tick's sample was in hand, for the latency report: `None` on a coasted tick.
+        let mut sample_in_hand: Option<Instant> = None;
         let fresh = match safety.read() {
             Ok(sensors) => {
                 state.consecutive_errors.store(0, Ordering::Relaxed);
                 sensors_read_ns = read_at;
+                sample_in_hand = Some(Instant::now());
                 Some(sensors)
             }
             Err(e) => {
@@ -3222,7 +3226,11 @@ async fn control_loop<T: RobotIo>(
         } else {
             0.0
         };
-        let idle_offset = if policy_cfg.idle_head { idle.head } else { [0.0; 4] };
+        let idle_offset = if policy_cfg.idle_head {
+            idle.head
+        } else {
+            [0.0; 4]
+        };
         let command = PolicyCommand {
             twist: twist_ema,
             // The chorale's sway rides on top of whatever the head was asked to do, computed
@@ -3866,6 +3874,18 @@ async fn control_loop<T: RobotIo>(
             Ok(applied) => limits.extend(applied.limits),
             Err(e) => tracing::warn!(error = %e, "bus write failed"),
         }
+        // The tick's latencies: the sample's ages from the bus, and the time from having the
+        // sample to the command written (observation, inference, filters, safety, the write).
+        let loop_timing =
+            sample_in_hand
+                .zip(safety.sample_timing())
+                .map(|(at, t)| proto::LoopTiming {
+                    servo_age_us: t.servo_age_max_us,
+                    imu_age_us: t.imu_age_us,
+                    command_age_us: t.command_age_us,
+                    round_trip_us: t.round_trip_us,
+                    compute_us: at.elapsed().as_micros().min(u32::MAX as u128) as u32,
+                });
 
         // Only assemble a frame when somebody is subscribed. On a robot nobody usually is,
         // and this would otherwise be a per-tick allocation on the thread that should not
@@ -3895,6 +3915,7 @@ async fn control_loop<T: RobotIo>(
                 control_loop: proto::LoopState {
                     hz: f64::from_bits(state.achieved_hz.load(Ordering::Relaxed)),
                     missed: state.missed.load(Ordering::Relaxed),
+                    timing: loop_timing,
                 },
                 joints: sensors.positions.to_vec(),
                 targets: targets.to_vec(),

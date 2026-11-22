@@ -64,6 +64,10 @@ pub struct SflpDecoder {
     quat_samples: u32,
     gyro_history: [[f64; 3]; 2],
     gravity_history: [[f64; 3]; 2],
+    /// Pass gyro and gravity through the three-sample median (the runtime's spike rejection).
+    /// On by default. The median of the last three ticks holds a smoothly changing signal back
+    /// by about one tick, 20 ms at 50 Hz, on top of the IMU's own latency; see [`Self::with_median`].
+    median: bool,
 }
 
 impl Default for SflpDecoder {
@@ -100,7 +104,17 @@ impl SflpDecoder {
             quat_samples: 0,
             gyro_history: [[0.0; 3]; 2],
             gravity_history: [[0.0, 0.0, -1.0]; 2],
+            median: true,
         }
+    }
+
+    /// Turn the three-sample median on gyro and gravity on or off. Off, the policy sees each
+    /// tick's own reading: about 20 ms fresher, with no rejection of a single wild block. The
+    /// Dukki training envs delay the IMU by 0 to 1 tick, so with the median and the chip's own
+    /// latency the robot sits past the top of that range.
+    pub fn with_median(mut self, on: bool) -> Self {
+        self.median = on;
+        self
     }
 
     /// Whether the chip has demonstrably produced fused output — roughly 0.25 s at 100 Hz.
@@ -156,10 +170,18 @@ impl SflpDecoder {
         // but that is a behaviour change to a path that currently walks.
         let gravity = normalise(rotate_inverse(self.last_quat, [0.0, 0.0, -1.0]));
 
-        let out = ImuData {
-            gyro: median3_each(&self.gyro_history, gyro),
-            gravity: median3_each(&self.gravity_history, gravity),
-            quat: self.last_quat,
+        let out = if self.median {
+            ImuData {
+                gyro: median3_each(&self.gyro_history, gyro),
+                gravity: median3_each(&self.gravity_history, gravity),
+                quat: self.last_quat,
+            }
+        } else {
+            ImuData {
+                gyro,
+                gravity,
+                quat: self.last_quat,
+            }
         };
         self.gyro_history = [self.gyro_history[1], gyro];
         self.gravity_history = [self.gravity_history[1], gravity];
@@ -380,6 +402,35 @@ mod tests {
         assert!(
             (magnitude - expected).abs() < 1e-9,
             "expected |gyro| {expected}, got {magnitude}"
+        );
+    }
+
+    /// With the median on, a step in the gyro shows a tick late; off, on the tick it happens.
+    #[test]
+    fn median_off_passes_each_reading_through() {
+        let still = [0u8; IMU_BLOCK_LEN];
+        let mut turning = [0u8; IMU_BLOCK_LEN];
+        turning[0..2].copy_from_slice(&(1000i16).to_le_bytes());
+        let magnitude = |d: &ImuData| d.gyro.iter().map(|v| v.abs()).sum::<f64>();
+
+        let mut with = SflpDecoder::new(SflpDecoder::DUKKI_MOUNT);
+        let mut without = SflpDecoder::new(SflpDecoder::DUKKI_MOUNT).with_median(false);
+        for d in [&mut with, &mut without] {
+            d.decode(&still);
+            d.decode(&still);
+        }
+        assert_eq!(
+            magnitude(&with.decode(&turning)),
+            0.0,
+            "median: one new reading is outvoted"
+        );
+        assert!(
+            magnitude(&with.decode(&turning)) > 0.0,
+            "median: shows on the second"
+        );
+        assert!(
+            magnitude(&without.decode(&turning)) > 0.0,
+            "no median: shows at once"
         );
     }
 }

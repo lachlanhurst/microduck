@@ -252,6 +252,11 @@ impl<T: RobotIo> Safety<T> {
         self.io.imu_ready()
     }
 
+    /// How old the last read's data was, for the loop's latency report.
+    pub fn sample_timing(&self) -> Option<crate::io::SampleTiming> {
+        self.io.sample_timing()
+    }
+
     /// The bus's shutdown request (the bridge's button) and the compute module's report back.
     /// Neither moves a motor.
     pub fn shutdown_requested(&self) -> bool {
