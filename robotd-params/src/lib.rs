@@ -1156,6 +1156,13 @@ pub struct PolicyParams {
     pub ground_pick_action_scale: Option<f64>,
     /// Gain multiplier while the ground pick runs.
     pub ground_pick_gain_ratio: f64,
+    /// Seconds the rise from sitting runs on the sitstand network before the gait takes over.
+    /// Absent: the installed set's scripted posture-flag entry, else 1.0 (the alpha's quick
+    /// rise). A robot whose sit-stand is trained on a slower rise needs it longer, or the walk
+    /// takes over from a crouch.
+    pub sitstand_rise_s: Option<f64>,
+    /// Seconds the seat takes to settle after the posture flag flips. Absent: the set's, else 2.0.
+    pub sitstand_ramp_s: Option<f64>,
     /// The one-shot skills this robot has, in priority order.
     ///
     /// Empty means the built-in three — kicks and roulade, with the numbers they have always
@@ -1947,8 +1954,14 @@ impl PolicyParams {
                     Mode::Roller => 0.8,
                 }),
             ground_pick_gain_ratio: self.ground_pick_gain_ratio,
-            sitstand_rise_s: seat.map_or(DEFAULT_SITSTAND_RISE_S, |t| t.rise_s),
-            sitstand_ramp_s: seat.map_or(DEFAULT_SITSTAND_RAMP_S, |t| t.ramp_s),
+            sitstand_rise_s: self
+                .sitstand_rise_s
+                .or(seat.map(|t| t.rise_s))
+                .unwrap_or(DEFAULT_SITSTAND_RISE_S),
+            sitstand_ramp_s: self
+                .sitstand_ramp_s
+                .or(seat.map(|t| t.ramp_s))
+                .unwrap_or(DEFAULT_SITSTAND_RAMP_S),
             skills,
             voltage_adapt: self.voltage_adapt,
             idle_head: self.idle_head,
@@ -2036,6 +2049,8 @@ impl Default for PolicyParams {
             ground_pick_period: None,
             ground_pick_action_scale: None,
             ground_pick_gain_ratio: 1.0,
+            sitstand_rise_s: None,
+            sitstand_ramp_s: None,
             skills: Vec::new(),
             voltage_adapt: true,
             nominal_voltage: 7.4,
@@ -2356,6 +2371,12 @@ pub enum ParamsError {
         min: f64,
         max: f64,
     },
+    #[error("{path}: policy.{key} must be a positive number of seconds, got {got}")]
+    PolicySeconds {
+        path: String,
+        key: &'static str,
+        got: f64,
+    },
     #[error(
         "{path}: pickup.resume_threshold ({resume}) must be below pickup.pause_threshold \
          ({pause}), and both between 0 and 1 — they are a hysteresis band on a probability"
@@ -2443,6 +2464,20 @@ impl Params {
             // `is_sign_positive` alone would pass NaN and zero; a hand-edited file can produce both.
             if got.is_nan() || got <= 0.0 {
                 return Err(ParamsError::BridgeValue {
+                    path: path.display().to_string(),
+                    key,
+                    got,
+                });
+            }
+        }
+        for (key, got) in [
+            ("sitstand_rise_s", self.policy.sitstand_rise_s),
+            ("sitstand_ramp_s", self.policy.sitstand_ramp_s),
+        ] {
+            if let Some(got) = got
+                && !(got.is_finite() && got > 0.0)
+            {
+                return Err(ParamsError::PolicySeconds {
                     path: path.display().to_string(),
                     key,
                     got,
@@ -2858,6 +2893,39 @@ mod tests {
             resolved.sitstand.unwrap().ends_with("alpha_sitstand.onnx"),
             "scripted is recorded, not turned into a skill"
         );
+    }
+
+    /// A `[policy]` key beats the set's sit-stand timing, and with no set beats the literals: a
+    /// robot whose sit-stand rises more slowly than the alpha's must not be handed to the gait
+    /// mid-rise.
+    #[test]
+    fn a_config_key_overrides_the_sitstands_timing() {
+        let set = published_set();
+        let tuned = super::PolicyParams {
+            sitstand_rise_s: Some(2.5),
+            ..Default::default()
+        };
+        let with_set = tuned.resolved_with(Some(&set));
+        assert_eq!(with_set.sitstand_rise_s, 2.5);
+        assert_eq!(with_set.sitstand_ramp_s, 2.5, "the set's, untouched");
+        let bare = tuned.resolved_with(None);
+        assert_eq!(bare.sitstand_rise_s, 2.5);
+        assert_eq!(bare.sitstand_ramp_s, super::DEFAULT_SITSTAND_RAMP_S);
+    }
+
+    /// Zero or negative seconds would hand back at once or never: refused at load.
+    #[test]
+    fn sitstand_seconds_must_be_positive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "[policy]\nsitstand_rise_s = 0.0\n");
+        let error = Params::load(&path, true).expect_err("refused").to_string();
+        assert!(error.contains("policy.sitstand_rise_s"), "{error}");
+        let path = write(
+            dir.path(),
+            "[policy]\nsitstand_rise_s = 2.5\nsitstand_ramp_s = 3.0\n",
+        );
+        let p = Params::load(&path, true).unwrap();
+        assert_eq!(p.policy.sitstand_rise_s, Some(2.5));
     }
 
     /// **A phase-encoded or posture-flag policy is never a zero-command skill.** Both are driven

@@ -262,6 +262,16 @@ pub const REGISTRY: &[Entry] = &[
         "One ground-pick cycle, seconds; unset resolves per mode",
     ),
     entry(
+        "policy.sitstand_rise_s",
+        Kind::OptionalFloat,
+        "Seconds the rise from sitting runs on the sitstand network; unset: the set's, else 1.0",
+    ),
+    entry(
+        "policy.sitstand_ramp_s",
+        Kind::OptionalFloat,
+        "Seconds the seat settles after the posture flag flips; unset: the set's, else 2.0",
+    ),
+    entry(
         "policy.ground_pick_action_scale",
         Kind::OptionalFloat,
         "Action scale during the ground pick; unset resolves per mode",

@@ -223,6 +223,13 @@ mode = "walk"
 # ground_pick_action_scale = 1.0
 # ground_pick_gain_ratio = 1.0
 
+# How long the rise from sitting runs on the sitstand network before the gait takes over, and how
+# long the seat takes to settle, seconds. Unset: the installed set's posture-flag entry, else 1.0
+# and 2.0 (the alpha's). A sit-stand trained on a slower rise needs a longer handover, or the walk
+# policy takes over from a crouch.
+# sitstand_rise_s = 1.0
+# sitstand_ramp_s = 2.0
+
 # How long a kick window stays on the kick network, seconds.
 # kick_duration = 0.5
 
