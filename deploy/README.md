@@ -171,6 +171,12 @@ backstop. If the backstop fired and restored netplan, re-cutting over unattended
 it, fail the same way, reboot, and go round again; it says so in the log and leaves wifi alone.
 The unit file stays on disk, disabled, as a record of what ran.
 
+Re-running after a phase 2 that died is the same command. The state file is still there, so
+`provision.sh` skips phase 1 and the reboot and does phase 2 in the operator's session, printing
+as it goes; it empties the log first, which otherwise still holds the failed attempt.
+`provision-board.sh` learns how the run ended from `/var/lib/robot/provision.outcome`, keyed by
+an id it passes in, and only waits for a reboot when the run actually took one.
+
 The token is needed three times, and only the first two end with provisioning: fetching these
 scripts, fetching the release, and then permanently — `updaterd` reads `GITHUB_TOKEN` from a
 systemd drop-in on every later update check. Passing `DUCK_TOKEN` through is what makes updates
@@ -240,6 +246,12 @@ installs from local files instead: the offline and factory path, and what CI use
 release before publishing it.
 
 ### Making it a dev board, so `--ref <branch>` works
+
+On a board that is already installed, this is one command —
+`sudo robotctl configure --allow-dev-daemon on` — and the rest of this section is not needed
+([`install-dev.md`](../docs/robot/install-dev.md#making-an-existing-board-take-dev-builds);
+[`updater-design.md`](../docs/design/updater-design.md) §5.4 owns the mechanism). What follows is
+the provisioning-time path, which also works with an `updaterd` that predates that switch.
 
 The same two conditions gate a build pushed straight from a laptop with
 `scripts/dev-push.sh` — it is signed with the same dev key, so a board that refuses branch
@@ -360,6 +372,7 @@ bad time" than a clock.
 /usr/local/bin/robotctl -> current/bin/robotctl
 /usr/local/sbin/robot-provision         provisioning, resumed after its reboot
 /var/lib/robot/provision.log            what the unattended half did
+/var/lib/robot/provision.outcome        how the last launched run ended, for provision-board.sh
 /etc/systemd/system/robot-provision.service   disabled once provisioning finished
 ```
 

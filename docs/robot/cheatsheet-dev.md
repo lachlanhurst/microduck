@@ -4,6 +4,16 @@ The commands that only make sense on a board set up by
 [`install-dev.md`](install-dev.md). Everything a robot needs day to day is in
 [`cheatsheet.md`](cheatsheet.md).
 
+## Making a board a dev board
+
+```
+sudo robotctl configure --allow-dev-daemon on
+```
+
+`off` undoes it. In the `sudo robotctl configure` editor it is the first row,
+`allow_dev_daemon`. [`install-dev.md`](install-dev.md#making-an-existing-board-take-dev-builds) has
+what it does.
+
 ## The dev channel
 
 Install what a branch last built on CI:
@@ -136,11 +146,11 @@ Then from this clone, in another terminal:
 cargo run -p padd -- --socket /tmp/robotd.sock
 ```
 
-`systemctl start padd` puts the robot's own back. The walking speeds are not flags: they are
-`[pad_drive]` in `robotd.toml`, set with `sudo robotctl configure` and picked up within a second.
-What is left on the command line is `--max-head` (radians) and `--deadzone`, which exists because
-analogue sticks rarely rest at exactly zero and the robot creeps without it. The unit runs with
-the defaults, so trying other values means running the binary yourself, here or on the board:
+`systemctl start padd` puts the robot's own back. The stick mapping and its limits are not flags:
+they are `[pad_drive]`, `[pad_axes]`, `[pad_head]`, `[pad_body]` and `[pad_roller]` in
+`robotd.toml`, set with `sudo robotctl configure` and picked up within a second. `--max-head`
+(radians, every head joint) and `--deadzone` remain, and win over the file while they are given,
+for trying a value without editing it:
 
 ```bash
 sudo -u padd /opt/robot/daemon/current/bin/padd --deadzone 0.15

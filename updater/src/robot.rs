@@ -149,13 +149,6 @@ pub trait RobotClient: Send + Sync {
     /// checks (`docs/design/updater-design.md` §5.5). `None` when unreachable.
     async fn model_api(&self, timeout: Duration) -> Option<u32>;
 
-    /// Is a telepresence/WebRTC session live? Restarting mid-session is a bad
-    /// surprise (`docs/design/architecture.md` §5).
-    ///
-    /// Defaults to `false` when unknown: this check is a courtesy, and must never
-    /// be the reason a recovery update is refused.
-    async fn remote_session_active(&self, timeout: Duration) -> bool;
-
     /// Tell `robotd` to re-read its policy slots from disk.
     ///
     /// Called after a policy set is swapped underneath it. `false` when the robot could not be
@@ -189,44 +182,54 @@ impl SocketRobotClient {
 }
 
 impl SocketRobotClient {
-    /// One request/response exchange, entirely inside `timeout`.
-    ///
-    /// Every failure — connect refused, no reply, malformed reply — collapses to
-    /// `None`, which callers map to their `Unreachable` variant. A wedged peer
-    /// (socket open, silent) must be indistinguishable from a dead one, or the
-    /// engine would hang on exactly the robot it is trying to repair.
+    /// One request/response exchange with `robotd` — see [`ask_socket`].
     async fn ask(&self, call: &crate::proto::Call, timeout: Duration) -> Option<serde_json::Value> {
-        let exchange = async {
-            let stream = tokio::net::UnixStream::connect(&self.path).await.ok()?;
-            let (read_half, mut write_half) = stream.into_split();
+        ask_socket(&self.path, call, timeout).await
+    }
+}
 
-            let request = crate::proto::Request::call(crate::proto::Id::Number(1), call);
-            let mut line = serde_json::to_vec(&request).ok()?;
-            line.push(b'\n');
+/// One request/response exchange on a daemon's unix socket, entirely inside `timeout`.
+///
+/// Every failure — connect refused, no reply, malformed reply, an error answer — collapses to
+/// `None`, which callers map to their `Unreachable` variant. A wedged peer (socket open, silent)
+/// must be indistinguishable from a dead one, or the engine would hang on exactly the robot it is
+/// trying to repair.
+pub async fn ask_socket(
+    path: &std::path::Path,
+    call: &crate::proto::Call,
+    timeout: Duration,
+) -> Option<serde_json::Value> {
+    let exchange = async {
+        let stream = tokio::net::UnixStream::connect(path).await.ok()?;
+        let (read_half, mut write_half) = stream.into_split();
 
-            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-            write_half.write_all(&line).await.ok()?;
-            write_half.flush().await.ok()?;
+        let request = crate::proto::Request::call(crate::proto::Id::Number(1), call);
+        let mut line = serde_json::to_vec(&request).ok()?;
+        line.push(b'\n');
 
-            let mut reply = String::new();
-            tokio::io::BufReader::new(read_half)
-                .read_line(&mut reply)
-                .await
-                .ok()?;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        write_half.write_all(&line).await.ok()?;
+        write_half.flush().await.ok()?;
 
-            let response: crate::proto::Response = serde_json::from_str(reply.trim()).ok()?;
-            response.result
-        };
+        let mut reply = String::new();
+        tokio::io::BufReader::new(read_half)
+            .read_line(&mut reply)
+            .await
+            .ok()?;
 
-        match tokio::time::timeout(timeout, exchange).await {
-            Ok(result) => result,
-            Err(_elapsed) => {
-                tracing::debug!(
-                    method = call.method(),
-                    "robotd did not answer within the timeout"
-                );
-                None
-            }
+        let response: crate::proto::Response = serde_json::from_str(reply.trim()).ok()?;
+        response.result
+    };
+
+    match tokio::time::timeout(timeout, exchange).await {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            tracing::debug!(
+                method = call.method(),
+                path = %path.display(),
+                "no answer within the timeout"
+            );
+            None
         }
     }
 }
@@ -320,15 +323,6 @@ impl RobotClient for SocketRobotClient {
                 .collect(),
         )
     }
-
-    async fn remote_session_active(&self, timeout: Duration) -> bool {
-        // Defaults to false when unknown: this check is a courtesy and must never be
-        // the reason a recovery update is refused.
-        self.ask(&crate::proto::Call::RobotRemoteSessionActive, timeout)
-            .await
-            .and_then(|r| serde_json::from_value::<crate::proto::SessionActiveResult>(r).ok())
-            .is_some_and(|answer| answer.active)
-    }
 }
 
 /// A `robotd` that isn't there.
@@ -357,10 +351,6 @@ impl RobotClient for AbsentRobot {
 
     async fn policy_paths(&self, _timeout: Duration) -> Option<Vec<String>> {
         None
-    }
-
-    async fn remote_session_active(&self, _timeout: Duration) -> bool {
-        false
     }
 }
 

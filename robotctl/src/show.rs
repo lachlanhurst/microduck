@@ -323,7 +323,7 @@ pub fn full_stamp(at: i64) -> String {
 /// `civil_from_days`), which is why the whole rendering is in UTC. Adding a date crate to
 /// `robotctl` for it would put a tz database on the recovery path to save fifteen lines of pure
 /// arithmetic with tests under it.
-fn civil(at: i64) -> (i64, u32, u32, u32, u32, u32) {
+pub(crate) fn civil(at: i64) -> (i64, u32, u32, u32, u32, u32) {
     let days = at.div_euclid(86_400);
     let secs = at.rem_euclid(86_400);
 
@@ -400,6 +400,7 @@ pub fn log_line(entry: &duck_ipc_proto::LogEntry) -> String {
         Outcome::Success => "applied".to_owned(),
         Outcome::RolledBack { reason } => format!("ROLLED BACK — {reason}"),
         Outcome::Aborted { reason } => format!("refused — {reason}"),
+        Outcome::Stuck { reason } => format!("STUCK — {reason}"),
     };
     format!(
         "{run}  {}  {:<10} {versions}: {outcome}",

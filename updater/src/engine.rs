@@ -1166,6 +1166,9 @@ impl Engine {
                     to: manifest.version.clone(),
                 })
             }
+            Err(reason) if !self.config.auto_rollback() => {
+                self.keep_failed(component, &manifest.version, &reason.to_string(), rec)
+            }
             Err(reason) => {
                 rec.phase(Phase::RollingBack, Some(reason.to_string()));
                 match self
@@ -1277,6 +1280,39 @@ impl Engine {
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "none".into())
             ))
+        })
+    }
+
+    /// A release that failed, left live because `[update_gate] auto_rollback` is off.
+    ///
+    /// The trial is cleared, as [`Self::rollback_to`] clears it when there is nothing to revert
+    /// to: left armed, the boot counter would ask the same question on every start and decide
+    /// the same way. `Stuck` rather than `RolledBack`, because nothing moved — and because
+    /// `known_bad` reads only `RolledBack`, so a release kept this way is still a target for a
+    /// later `select`. The reason names the command that does what the robot did not.
+    fn keep_failed(
+        &self,
+        component: &str,
+        version: &semver::Version,
+        reason: &str,
+        rec: &Recorder,
+    ) -> Result<ApplyResult, Error> {
+        self.boot_counter.confirm(component)?;
+        tracing::warn!(
+            component,
+            %version,
+            reason,
+            "release failed; auto-rollback is off, so it stays live"
+        );
+        rec.say(format!(
+            "auto-rollback is off ([update_gate] auto_rollback), so {version} stays live"
+        ));
+        Ok(ApplyResult::Stuck {
+            version: version.clone(),
+            reason: format!(
+                "{reason}; auto-rollback is off, so {version} stays live — \
+                 `robotctl update rollback {component}` reverts it"
+            ),
         })
     }
 
@@ -1395,6 +1431,36 @@ impl Engine {
         })
     }
 
+    /// The preflight an OS update or slot switch passes before it starts: the robot is not
+    /// moving and nobody is watching it remotely, as for a daemon release — both end in a
+    /// reboot, which is a harder restart than any release makes.
+    ///
+    /// No disk check: the bundle lands on the data partition, and the script checks its size
+    /// itself. The clock only when the network is involved: a slot switch downloads nothing,
+    /// and a board whose clock never synced is the board that may most need to go back.
+    pub async fn os_preflight(&self, interrupt_sessions: bool, network: bool) -> Result<(), Error> {
+        let report = preflight::Preflight {
+            robot: &*self.robot,
+            required_bytes: 0,
+            available_bytes: u64::MAX,
+            interrupt_sessions,
+            webrtc_peers: crate::proto::read_webrtc_peers(),
+            robot_query_timeout: ROBOT_QUERY_TIMEOUT,
+            from_dir: None,
+        }
+        .run()
+        .await?;
+        let failure = report
+            .results
+            .iter()
+            .filter(|r| network || r.check != preflight::Check::Clock)
+            .find(|r| !r.passed);
+        match failure {
+            Some(failure) => Err(preflight::refusal(failure)),
+            None => Ok(()),
+        }
+    }
+
     /// Install a duck detector from the Hub, and restart `mediad` onto it.
     ///
     /// `mediad` loads the model once, at startup, so a swapped set is invisible to it until it
@@ -1446,8 +1512,14 @@ impl Engine {
         // What the robot is pointed at, so the prune that follows the fetch cannot take a gait
         // out from under it. `None` — a robot that did not answer — prunes nothing at all.
         let in_use = self.robot.policy_paths(ROBOT_QUERY_TIMEOUT).await;
+        // Read every time rather than once at startup, so `robotctl configure` applies without
+        // restarting `updaterd` — the same reason `hw_rev` reads the board each check.
+        let allow_community = robotd_params::PolicyParams::community_allowed(std::path::Path::new(
+            robotd_params::DEFAULT_PATH,
+        ));
         crate::policy::fetch(
             &self.config.policy_library,
+            allow_community,
             repo,
             revision,
             file,
@@ -1655,6 +1727,9 @@ impl Engine {
                     from: from.clone(),
                     to: to.clone(),
                 })
+            }
+            Err(reason) if !self.config.auto_rollback() => {
+                self.keep_failed(component, to, &reason.to_string(), rec)
             }
             Err(reason) => {
                 rec.phase(Phase::RollingBack, Some(reason.to_string()));
@@ -1941,14 +2016,7 @@ impl Engine {
                 }
             }
 
-            tracing::warn!(
-                component = %pending.component,
-                version = %pending.version,
-                boots = pending.boots,
-                "pending update never confirmed healthy; reverting"
-            );
-
-            let store = self.store(&pending.component)?;
+            let auto_rollback = self.config.auto_rollback();
 
             // Its own run, and not a continuation of the apply that armed the trial — because it
             // is one. That apply ended when `updaterd` restarted itself, minutes and a reboot ago,
@@ -1961,7 +2029,11 @@ impl Engine {
                 &self.config.state_dir,
                 RunEvent::Began {
                     component: ComponentId::new(pending.component.clone()),
-                    target: format!("boot-counter revert from {}", pending.version),
+                    target: if auto_rollback {
+                        format!("boot-counter revert from {}", pending.version)
+                    } else {
+                        format!("boot-counter verdict on {}", pending.version)
+                    },
                     installed: Some(pending.version.clone()),
                     source: "already installed on this board".into(),
                     requested_by: None,
@@ -1971,6 +2043,32 @@ impl Engine {
                 "this release was armed for trial and never reported healthy across {} boots",
                 pending.boots
             ));
+
+            let reason = format!("never reported healthy across {} boots", pending.boots);
+
+            if !auto_rollback {
+                let outcome =
+                    self.keep_failed(&pending.component, &pending.version, &reason, &rec)?;
+                rec.finish(&Ok(outcome.clone()));
+                self.record(
+                    &pending.component,
+                    pending.previous.clone(),
+                    &Ok(outcome.clone()),
+                    rec.run(),
+                );
+                outcomes.push(outcome);
+                continue;
+            }
+
+            // `scripts/board-test.sh` greps for this line.
+            tracing::warn!(
+                component = %pending.component,
+                version = %pending.version,
+                boots = pending.boots,
+                "pending update never confirmed healthy; reverting"
+            );
+
+            let store = self.store(&pending.component)?;
 
             // §8.2's chain: previous → golden. Escalate past `previous` when it is
             // absent, gone from disk, or itself recorded as bad — otherwise a robot
@@ -1999,8 +2097,6 @@ impl Engine {
             let reverted = self
                 .rollback_to(&pending.component, &cfg, &store, target.as_ref(), &rec)
                 .await?;
-
-            let reason = format!("never reported healthy across {} boots", pending.boots);
 
             let outcome = match reverted {
                 Some(reverted) => ApplyResult::RolledBack {
@@ -2458,6 +2554,7 @@ impl Engine {
             required_bytes: required,
             available_bytes: available,
             interrupt_sessions: options.interrupt_sessions,
+            webrtc_peers: crate::proto::read_webrtc_peers(),
             robot_query_timeout: ROBOT_QUERY_TIMEOUT,
             from_dir: options.from_dir.as_deref(),
         }
@@ -2465,11 +2562,7 @@ impl Engine {
         .await?;
 
         if let Some(failure) = report.first_failure() {
-            return Err(Error::Preflight(format!(
-                "{:?}: {}",
-                failure.check,
-                failure.detail.clone().unwrap_or_default()
-            )));
+            return Err(preflight::refusal(failure));
         }
         Ok(())
     }
@@ -2779,8 +2872,8 @@ fn journal_outcome(
         ),
         Ok(ApplyResult::Stuck { version, reason }) => (
             Some(version.clone()),
-            Outcome::Aborted {
-                reason: format!("stuck on {version}: {reason}"),
+            Outcome::Stuck {
+                reason: reason.clone(),
             },
         ),
         Ok(ApplyResult::AlreadyCurrent { .. } | ApplyResult::DryRunPassed { .. }) => return None,
