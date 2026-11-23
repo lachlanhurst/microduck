@@ -175,7 +175,9 @@ impl<T: Read + Write> BridgeIo<T> {
             sample_round_trip_us: 0,
             flags: 0,
             imu_status: proto::imu_status::STARTING,
-            imu: SflpDecoder::new(config.imu_mount).with_median(config.imu_median),
+            imu: SflpDecoder::new(config.imu_mount)
+                .with_median(config.imu_median)
+                .with_gyro_mdps_per_lsb(duck_bridge_proto::IMU_GYRO_MDPS_PER_LSB),
             stale_imu: ImuStale::default(),
             last_rotation_samples: None,
             offsets: match config.zero_counts {

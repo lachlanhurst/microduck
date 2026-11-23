@@ -135,8 +135,10 @@ status, 12-byte block, age and rotation-sample counter. `BridgeIo` builds `Senso
   policy gets, `dukki` hardware.md §5.1.1); torque; housing and winding temperature; supply
   voltage; mode; fault and warning bits; the 13-bit output-shaft encoder; how old the reply is;
   replies and failures counted.
-- **IMU:** the 12-byte block `SflpDecoder` already reads (gyro at ±500 dps, SFLP game rotation as
-  three half floats), unchanged from the `imu_to_dxl` board so the decoder is untouched; plus the
+- **IMU:** the 12-byte block `SflpDecoder` already reads (gyro counts, SFLP game rotation as
+  three half floats), laid out as on the `imu_to_dxl` board. The gyro is at ±2000 dps
+  (`IMU_GYRO_MDPS_PER_LSB`, protocol version 3, 23/11/2026), not the board's ±500: Dukki's
+  roll-overs pass the ±500 range's 10 rad/s; plus the
   chip's gravity and gyro-bias estimates, sample counters, FIFO overruns and the sample's age.
   `BridgeIo` judges staleness by the rotation-sample counter, not by comparing bytes.
 - **Pack voltage** from the bridge's ADC in mV, 0 until it measures; `BridgeIo` falls back to the

@@ -33,8 +33,15 @@
 
 /// Bumped whenever a payload layout changes. A frame carrying another version is rejected by
 /// [`FrameDecoder`] rather than misread, and [`Info`] lets the compute module say which side is
-/// out of date before anything moves.
-pub const PROTOCOL_VERSION: u8 = 2;
+/// out of date before anything moves. 3 (23/11/2026): the IMU block's gyro counts went from
+/// ±500 dps to ±2000 dps ([`IMU_GYRO_MDPS_PER_LSB`]); a version 2 decoder would read every rate
+/// four times too small.
+pub const PROTOCOL_VERSION: u8 = 3;
+
+/// The gyro counts in [`ImuState::block`]: the LSM6DSV16X at ±2000 dps, 70 mdps per count
+/// (its datasheet sensitivity). ±500 dps (17.5) saturated at about 10 rad/s, which Dukki's
+/// roll-overs from face up pass.
+pub const IMU_GYRO_MDPS_PER_LSB: f64 = 70.0;
 
 /// Servo slots in [`Command`] and [`State`], indexed by servo ID. The J288 bus addresses 0 to 14
 /// (15 is broadcast), and the robot has fifteen joints with each servo's ID set to its joint's
@@ -327,7 +334,7 @@ pub struct ImuState {
     /// One of [`imu_status`].
     pub status: u8,
     /// The 12-byte block `duck-control`'s `SflpDecoder` reads: gyro x, y, z as `i16` raw counts
-    /// at ±500 dps, then the SFLP game-rotation quaternion x, y, z as half floats. All-zero
+    /// at ±2000 dps ([`IMU_GYRO_MDPS_PER_LSB`]), then the SFLP game-rotation quaternion x, y, z as half floats. All-zero
     /// quaternion bytes until the first fused sample.
     pub block: [u8; 12],
     /// How long before this frame the bridge last drained the IMU's FIFO, µs.

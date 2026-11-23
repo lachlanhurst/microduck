@@ -9,7 +9,7 @@
 //!
 //! | bytes | contents |
 //! |---|---|
-//! | 0..6  | gyro x/y/z, `i16` LE raw counts, ±500 dps |
+//! | 0..6  | gyro x/y/z, `i16` LE raw counts, ±500 dps (the bridge's: ±2000, [`SflpDecoder::with_gyro_mdps_per_lsb`]) |
 //! | 6..12 | SFLP quaternion x/y/z as IEEE half-precision; `w = √(1 − x² − y² − z²)` |
 //!
 //! The board's full diagnostic block is 20 bytes (it also carries raw accelerometer, a
@@ -44,7 +44,7 @@ impl Default for ImuData {
     }
 }
 
-/// ±500 dps at 17.5 mdps/LSB, in rad/s.
+/// ±500 dps at 17.5 mdps/LSB, in rad/s: the `imu_to_dxl` board's.
 const GYRO_RAD_PER_LSB: f64 = 0.0175 * std::f64::consts::PI / 180.0;
 
 /// Decodes the board's block into [`ImuData`].
@@ -64,6 +64,8 @@ pub struct SflpDecoder {
     quat_samples: u32,
     gyro_history: [[f64; 3]; 2],
     gravity_history: [[f64; 3]; 2],
+    /// One gyro count in rad/s: [`GYRO_RAD_PER_LSB`] unless [`Self::with_gyro_mdps_per_lsb`].
+    gyro_rad_per_lsb: f64,
     /// Pass gyro and gravity through the three-sample median (the runtime's spike rejection).
     /// On by default. The median of the last three ticks holds a smoothly changing signal back
     /// by about one tick, 20 ms at 50 Hz, on top of the IMU's own latency; see [`Self::with_median`].
@@ -104,8 +106,17 @@ impl SflpDecoder {
             quat_samples: 0,
             gyro_history: [[0.0; 3]; 2],
             gravity_history: [[0.0, 0.0, -1.0]; 2],
+            gyro_rad_per_lsb: GYRO_RAD_PER_LSB,
             median: true,
         }
+    }
+
+    /// The gyro counts' scale, mdps per count, where the block is not the `imu_to_dxl` board's
+    /// ±500 dps: the bridge runs its LSM6DSV16X at ±2000 dps
+    /// (`duck_bridge_proto::IMU_GYRO_MDPS_PER_LSB`).
+    pub fn with_gyro_mdps_per_lsb(mut self, mdps: f64) -> Self {
+        self.gyro_rad_per_lsb = mdps * 1e-3 * std::f64::consts::PI / 180.0;
+        self
     }
 
     /// Turn the three-sample median on gyro and gravity on or off. Off, the policy sees each
@@ -127,9 +138,9 @@ impl SflpDecoder {
 
     pub fn decode(&mut self, raw: &[u8; IMU_BLOCK_LEN]) -> ImuData {
         let gyro_sensor = [
-            i16::from_le_bytes([raw[0], raw[1]]) as f64 * GYRO_RAD_PER_LSB,
-            i16::from_le_bytes([raw[2], raw[3]]) as f64 * GYRO_RAD_PER_LSB,
-            i16::from_le_bytes([raw[4], raw[5]]) as f64 * GYRO_RAD_PER_LSB,
+            i16::from_le_bytes([raw[0], raw[1]]) as f64 * self.gyro_rad_per_lsb,
+            i16::from_le_bytes([raw[2], raw[3]]) as f64 * self.gyro_rad_per_lsb,
+            i16::from_le_bytes([raw[4], raw[5]]) as f64 * self.gyro_rad_per_lsb,
         ];
         let gyro = rotate(self.mount, gyro_sensor);
 
@@ -402,6 +413,24 @@ mod tests {
         assert!(
             (magnitude - expected).abs() < 1e-9,
             "expected |gyro| {expected}, got {magnitude}"
+        );
+    }
+
+    /// The bridge's ±2000 dps counts are four times the `imu_to_dxl` board's.
+    #[test]
+    fn gyro_scale_follows_the_full_scale() {
+        let mut block = [0u8; IMU_BLOCK_LEN];
+        block[0..2].copy_from_slice(&1000i16.to_le_bytes());
+        let rate = |mut d: SflpDecoder| {
+            d = d.with_median(false);
+            d.decode(&block).gyro.iter().map(|v| v.abs()).sum::<f64>()
+        };
+        let at_500 = rate(SflpDecoder::default());
+        let at_2000 = rate(SflpDecoder::default().with_gyro_mdps_per_lsb(70.0));
+        assert!((at_500 - 1000.0 * 0.0175_f64.to_radians()).abs() < 1e-9);
+        assert!(
+            (at_2000 - 4.0 * at_500).abs() < 1e-9,
+            "{at_2000} vs 4 x {at_500}"
         );
     }
 
