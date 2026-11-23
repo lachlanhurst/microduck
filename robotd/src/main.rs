@@ -1326,6 +1326,7 @@ fn open_bridge(bus: &params::Bus, attempt: u32) -> Option<duck_control::bridge::
             .bridge_imu_mount
             .map_or(duck_control::imu::SflpDecoder::DUKKI_MOUNT, |m| m.wxyz()),
         imu_median: bus.bridge_imu_median,
+        mouth_kp: bus.bridge_mouth_kp,
     };
     if loud && bus.bridge_imu_mount.is_none() {
         tracing::warn!(
@@ -2230,12 +2231,15 @@ async fn control_loop<T: RobotIo>(
     let dt = period.as_secs_f64();
     let cmd_alpha = params.control.cmd_alpha.clamp(0.0, 1.0);
     let head_alpha = params.control.head_alpha.clamp(0.0, 1.0);
+    let mouth_alpha = params.control.mouth_alpha.clamp(0.0, 1.0);
     // Whether measured velocity and load go on the state stream. Read once: it is a startup
     // setting like the rest of `[control]`, and `robotctl configure` writing the file takes
     // effect on the next start of the daemon, not mid-tick.
     let publish_measurements = params.control.publish_velocity_and_load;
     let mut twist_ema = [0.0f64; 3];
     let mut head_ema = [0.0f64; 4];
+    // The mouth opening, 0 closed to 1 open, smoothed. Starts closed, as the intent does.
+    let mut mouth_ema = 0.0f64;
     let mut body_ema = [0.0f64; 3];
 
     // Coasting over a dropped bus read, and where the robot actually is.
@@ -3196,6 +3200,9 @@ async fn control_loop<T: RobotIo>(
         for (ema, target) in head_ema.iter_mut().zip(gated.head) {
             slew(ema, target, head_alpha);
         }
+        // Always tracking, whoever has the mouth this tick, so handing it back to the trigger
+        // never starts from a stale opening.
+        slew(&mut mouth_ema, snapshot.mouth.clamp(0.0, 1.0), mouth_alpha);
         if snapshot.pose.active {
             for (ema, target) in body_ema.iter_mut().zip(snapshot.pose.body) {
                 slew(ema, target, cmd_alpha);
@@ -3861,7 +3868,7 @@ async fn control_loop<T: RobotIo>(
         // a restart cannot snap a mouth.
         if driving && theremin_state.is_none() && chorale_state.is_none() {
             targets[duck_control::model::MOUTH_INDEX] =
-                duck_control::model::mouth_target(snapshot.mouth);
+                duck_control::model::mouth_target(mouth_ema);
         }
 
         // The next feature row pairs its reading with this command.

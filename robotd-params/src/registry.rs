@@ -149,6 +149,11 @@ pub const REGISTRY: &[Entry] = &[
         "This robot's trunk IMU mount, chip to trunk — a calibration writes it; absent, the mount as designed",
     ),
     entry(
+        "bus.bridge_mouth_kp",
+        Kind::Float,
+        "The mouth's J288 kp, N·m/rad, instead of the policy-derived one; absent, the same as every joint",
+    ),
+    entry(
         "bus.bridge_imu_median",
         Kind::Bool,
         "Three-sample median on the trunk IMU's gyro and gravity (about one tick of lag)",
@@ -164,6 +169,11 @@ pub const REGISTRY: &[Entry] = &[
         "control.head_alpha",
         Kind::Float,
         "EMA smoothing on head targets, 1.0 = pass-through",
+    ),
+    entry(
+        "control.mouth_alpha",
+        Kind::Float,
+        "EMA smoothing on the mouth opening, 1.0 = pass-through",
     ),
     entry(
         "control.publish_velocity_and_load",

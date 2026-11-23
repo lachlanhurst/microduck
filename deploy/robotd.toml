@@ -48,6 +48,11 @@ port = "/dev/ttyS7"
 # own latency. false hands the policy each tick's own reading.
 # bridge_imu_median = true
 
+# The mouth's kp, N·m/rad, fixed instead of scaled from the policy gain. The mouth is in no
+# policy; at the legs' kp the jaw's friction holds the beak a few degrees short of closed.
+# Absent, the mouth takes the same kp as every other joint.
+# bridge_mouth_kp = 4.0
+
 # This robot's joint zeros, a [bus.bridge_zero] table: each J288's output encoder reading in
 # counts (0 to 8191 a turn) with its joint at the model's zero, one key per joint, every joint
 # present. Written by the calibration (dukki's scripts/joint_scope, robot in the calibration jig),
@@ -98,6 +103,11 @@ hz = 50
 # head targets and the body pose.
 # cmd_alpha = 0.2
 # head_alpha = 0.2
+
+# The same smoothing on the mouth opening (the pad's triggers). 1.0 passes it straight through,
+# which suits a servo that limits its own speed; a J288 stiff enough to close the beak
+# (`bridge_mouth_kp`) snaps without it. 0.1 at 50 Hz is a time constant of about 0.2 s.
+# mouth_alpha = 1.0
 
 # Whether the state stream carries measured joint velocity and load — `velocities` and
 # `currents_ma` on `robot.state`. The servos report both in the same twelve-byte read as

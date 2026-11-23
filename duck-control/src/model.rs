@@ -84,15 +84,26 @@ pub const REST_POSITION: [f64; NUM_JOINTS] = [
     -0.4352, // right_ankle
 ];
 
-/// Mouth travel, radians: closed and fully open. Closed is the alpha's −5° (the v1.6 range,
-/// from `microduck_runtime`'s `variant.rs`), which Dukki's calibration puts 3° off the closed
-/// stop. Open is Dukki's own, +21°: its jaw travels to +24.9° ([`JOINT_TRAVEL_DEG`]), and the
-/// safety clamp holds targets [`STOP_MARGIN_DEG`] inside that, at +21.9°. The alpha's +30°
-/// left every opening past about 77% clamped to the same angle.
+/// Mouth travel, radians: closed and fully open. Closed is −8°, where Dukki's beak meets: the
+/// mouth's zero is put so the closed stop reads −8° (dukki `hardware.md` section 12), and the
+/// limp robot rests there (−7.6° to −8.2° measured, −7.85° in [`REST_POSITION`]). The alpha's
+/// −5° left the beak about 3° open. Commanding the meeting point presses on nothing: a fraction
+/// of a degree past it at the policy's kp is a few mN·m. The clamp's lower bound for this joint
+/// is [`MOUTH_CLOSED_MARGIN_DEG`] inside the travel rather than [`STOP_MARGIN_DEG`], so the
+/// closed target is not clamped short.
+///
+/// Open is Dukki's own, +21°: its jaw travels to +24.9° ([`JOINT_TRAVEL_DEG`]), and the safety
+/// clamp holds targets [`STOP_MARGIN_DEG`] inside that, at +21.9°. The alpha's +30° left every
+/// opening past about 77% clamped to the same angle.
 ///
 /// The mouth is not part of any policy — every alpha network is 14 actions with this joint
 /// skipped — so these two numbers and [`mouth_target`] are the whole of mouth control.
-pub const MOUTH_CLOSED: f64 = -5.0 * std::f64::consts::PI / 180.0;
+pub const MOUTH_CLOSED: f64 = -8.0 * std::f64::consts::PI / 180.0;
+
+/// The clamp's margin at the mouth's closed end, in place of [`STOP_MARGIN_DEG`]. The −9.4° end
+/// of the mouth's travel is the beak squeezed shut by hand; the beak meets at −8°, so a 1° margin
+/// (−8.4°) lets [`MOUTH_CLOSED`] through and still stops a target pressing the jaw hard shut.
+pub const MOUTH_CLOSED_MARGIN_DEG: f64 = 1.0;
 pub const MOUTH_OPEN: f64 = 21.0 * std::f64::consts::PI / 180.0;
 
 /// Joint angle for a mouth opening fraction. 0 is closed, 1 is fully open; anything outside
@@ -371,11 +382,11 @@ mod tests {
         assert_eq!(battery_percent(-1.0), 0.0);
     }
 
-    /// The mouth range: −5° closed, +21° open. A fraction outside 0..1 (or a NaN from a broken
+    /// The mouth range: −8° closed, +21° open. A fraction outside 0..1 (or a NaN from a broken
     /// client) must clamp rather than command a servo past travel.
     #[test]
     fn mouth_target_spans_dukkis_range() {
-        assert!((mouth_target(0.0) - (-5.0f64.to_radians())).abs() < 1e-12);
+        assert!((mouth_target(0.0) - (-8.0f64.to_radians())).abs() < 1e-12);
         assert!((mouth_target(1.0) - 21.0f64.to_radians()).abs() < 1e-12);
         assert_eq!(mouth_target(-3.0), mouth_target(0.0));
         assert_eq!(mouth_target(7.0), mouth_target(1.0));

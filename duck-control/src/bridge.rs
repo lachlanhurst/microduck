@@ -36,7 +36,7 @@ use crate::imu::SflpDecoder;
 use crate::io::{
     HostState, ImuStale, IoError, JointTargets, Result, RobotIo, SampleTiming, Sensors, SlowSensors,
 };
-use crate::model::{JOINT_IDS, JOINT_NAMES, NUM_JOINTS, travel_centre};
+use crate::model::{JOINT_IDS, JOINT_NAMES, MOUTH_INDEX, NUM_JOINTS, travel_centre};
 
 /// What the bridge firmware runs today (`link.rs` there). 4 Mbps waits on a scope check of the
 /// neck harness.
@@ -79,6 +79,10 @@ pub struct BridgeConfig {
     pub imu_mount: [f64; 4],
     /// The three-sample median on gyro and gravity ([`SflpDecoder::with_median`]). On by default.
     pub imu_median: bool,
+    /// The mouth's kp, N·m/rad, in place of the policy-derived one. The mouth is in no policy,
+    /// so nothing ties it to the legs' gain, and at the policy's 1.0 N·m/rad the jaw's friction
+    /// held Dukki's beak 3° short of a closed target. `None` drives it like every other joint.
+    pub mouth_kp: Option<f64>,
 }
 
 impl Default for BridgeConfig {
@@ -89,6 +93,7 @@ impl Default for BridgeConfig {
             zero_counts: None,
             imu_mount: SflpDecoder::DUKKI_MOUNT,
             imu_median: true,
+            mouth_kp: None,
         }
     }
 }
@@ -375,13 +380,16 @@ impl<T: Read + Write> BridgeIo<T> {
     /// Fills every servo from the current gains and torque state.
     fn fill_command(&mut self) {
         let drive = self.torque_on && self.targets_set;
-        for s in &mut self.command.servos {
+        for (joint, s) in self.command.servos.iter_mut().enumerate() {
             s.mode = if drive {
                 ServoMode::Foc
             } else {
                 ServoMode::Stop
             };
-            s.kp = self.kp as f32;
+            s.kp = match self.config.mouth_kp {
+                Some(kp) if joint == MOUTH_INDEX => kp as f32,
+                _ => self.kp as f32,
+            };
             s.kd = self.config.kd as f32;
             s.velocity = 0.0;
             s.torque = 0.0;
@@ -884,6 +892,27 @@ mod tests {
         for (j, s) in last.servos.iter().enumerate() {
             assert_eq!(s.mode, ServoMode::Foc);
             assert!((s.position - j as f32 * 0.1).abs() < 1e-6);
+        }
+    }
+
+    /// A configured mouth kp drives the mouth alone, and stays put when the policy's gain moves:
+    /// the legs follow `set_gain`, the mouth does not.
+    #[test]
+    fn mouth_kp_overrides_the_policy_gain_on_the_mouth_only() {
+        let config = BridgeConfig {
+            mouth_kp: Some(4.0),
+            ..BridgeConfig::default()
+        };
+        let mut io = BridgeIo::with_transport(FakeBridge::new(), config).unwrap();
+        io.set_gain(200).unwrap();
+        io.set_torque(true).unwrap();
+        for gain in [200, 50] {
+            io.set_gain(gain).unwrap();
+            let last = io.port.commands.last().unwrap();
+            for (j, s) in last.servos.iter().enumerate() {
+                let want = if j == MOUTH_INDEX { 4.0 } else { gain as f32 * 0.01 };
+                assert!((s.kp - want).abs() < 1e-6, "{} kp {}", JOINT_NAMES[j], s.kp);
+            }
         }
     }
 

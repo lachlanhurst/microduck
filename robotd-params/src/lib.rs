@@ -2136,6 +2136,11 @@ pub struct Bus {
     /// 20 ms at 50 Hz, on top of the chip's own latency; false hands the policy each tick's own
     /// reading.
     pub bridge_imu_median: bool,
+    /// The mouth's J288 kp, N·m/rad, fixed rather than scaled from the policy gain: the mouth is
+    /// in no policy, and at the legs' kp the jaw's friction holds it a few degrees short of
+    /// closed. Absent, the mouth takes the same kp as every other joint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge_mouth_kp: Option<f64>,
 }
 
 /// A rotation as a unit quaternion, scalar first.
@@ -2224,6 +2229,10 @@ pub struct Control {
     pub cmd_alpha: f64,
     /// Same, for head targets and the body pose.
     pub head_alpha: f64,
+    /// Same, for the mouth opening from `robot.mouth` (the pad's triggers). `1.0` is
+    /// pass-through, the prototype's behaviour: the XL330 limited the speed itself. A J288 at a
+    /// kp that closes the beak (`bus.bridge_mouth_kp`) snaps there, so Dukki eases it.
+    pub mouth_alpha: f64,
     /// Whether the state stream carries measured joint velocity and load
     /// (`RobotState::velocities`, `RobotState::currents_ma`).
     ///
@@ -2288,6 +2297,7 @@ impl Default for Bus {
             bridge_zero: None,
             bridge_imu_mount: None,
             bridge_imu_median: true,
+            bridge_mouth_kp: None,
         }
     }
 }
@@ -2298,6 +2308,7 @@ impl Default for Control {
             hz: 50,
             cmd_alpha: 0.2,
             head_alpha: 0.2,
+            mouth_alpha: 1.0,
             publish_velocity_and_load: true,
         }
     }
@@ -2460,6 +2471,10 @@ impl Params {
             ("bridge_baud", self.bus.bridge_baud as f64),
             ("bridge_kp_per_gain", self.bus.bridge_kp_per_gain),
             ("bridge_kd", self.bus.bridge_kd),
+            (
+                "bridge_mouth_kp",
+                self.bus.bridge_mouth_kp.unwrap_or(1.0),
+            ),
         ] {
             // `is_sign_positive` alone would pass NaN and zero; a hand-edited file can produce both.
             if got.is_nan() || got <= 0.0 {
@@ -3892,6 +3907,7 @@ mod tests {
         assert_eq!(from_file.control.hz, built_in.control.hz);
         assert_eq!(from_file.control.cmd_alpha, built_in.control.cmd_alpha);
         assert_eq!(from_file.control.head_alpha, built_in.control.head_alpha);
+        assert_eq!(from_file.control.mouth_alpha, built_in.control.mouth_alpha);
         assert_eq!(
             from_file.control.publish_velocity_and_load,
             built_in.control.publish_velocity_and_load

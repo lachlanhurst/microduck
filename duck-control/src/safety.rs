@@ -36,7 +36,8 @@ use std::time::Duration;
 
 use crate::io::{IoError, JointTargets, RobotIo, Sensors};
 use crate::model::{
-    JOINT_NAMES, JOINT_TRAVEL_AT_JIG_ZEROS, JOINT_TRAVEL_DEG, NUM_JOINTS, STOP_MARGIN_DEG,
+    JOINT_NAMES, JOINT_TRAVEL_AT_JIG_ZEROS, JOINT_TRAVEL_DEG, MOUTH_CLOSED_MARGIN_DEG, MOUTH_INDEX,
+    NUM_JOINTS, STOP_MARGIN_DEG,
 };
 use crate::obs::Command;
 
@@ -82,8 +83,14 @@ fn ranges_within(travel: Option<&[(f64, f64); NUM_JOINTS]>) -> [(f64, f64); NUM_
     let mut ranges: [(f64, f64); NUM_JOINTS] = std::array::from_fn(|j| match travel {
         Some(travel) => {
             let (lo, hi) = travel[j];
+            // The mouth's closed end is where the beak meets, not a stop to keep clear of.
+            let lo_margin = if j == MOUTH_INDEX {
+                MOUTH_CLOSED_MARGIN_DEG
+            } else {
+                STOP_MARGIN_DEG
+            };
             (
-                (lo + STOP_MARGIN_DEG).to_radians().max(ACTUATOR_MIN),
+                (lo + lo_margin).to_radians().max(ACTUATOR_MIN),
                 (hi - STOP_MARGIN_DEG).to_radians().min(ACTUATOR_MAX),
             )
         }
@@ -817,7 +824,8 @@ mod tests {
     }
 
     /// With the measured travel in, every joint's range sits the margin inside it, never past
-    /// the actuator's turn, and head roll keeps its tighter ±15°.
+    /// the actuator's turn, head roll keeps its tighter ±15°, and the mouth's closed end takes
+    /// its own smaller margin.
     #[test]
     fn travel_stops_sit_the_margin_inside_the_measured_travel() {
         let ranges = ranges_within(Some(&JOINT_TRAVEL_DEG));
@@ -828,7 +836,12 @@ mod tests {
                 assert_eq!((min, max), (-HEAD_ROLL_STOP, HEAD_ROLL_STOP));
                 continue;
             }
-            let want_min = (lo + STOP_MARGIN_DEG).to_radians().max(ACTUATOR_MIN);
+            let lo_margin = if j == MOUTH_INDEX {
+                MOUTH_CLOSED_MARGIN_DEG
+            } else {
+                STOP_MARGIN_DEG
+            };
+            let want_min = (lo + lo_margin).to_radians().max(ACTUATOR_MIN);
             let want_max = (hi - STOP_MARGIN_DEG).to_radians().min(ACTUATOR_MAX);
             assert!(
                 (min - want_min).abs() < 1e-12 && (max - want_max).abs() < 1e-12,
