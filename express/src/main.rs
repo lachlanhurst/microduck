@@ -90,14 +90,16 @@ struct Args {
     /// Channel on that controller.
     #[arg(long, default_value_t = 0)]
     fan_channel: u32,
-    /// PWM frequency. The head's 2-wire fan stalls at any duty short of full at 25 kHz, which
-    /// browns out its own electronics every cycle; at 100 Hz and 200 Hz it runs from 20 %, with
-    /// less hum at 200 (measured 24/10/2026).
+    /// PWM frequency. Only matters with `--fan-min` below 1: at the default the fan is on at full
+    /// or off, and the PWM never switches while it runs. A 2-wire fan on a low-side switch stalls
+    /// at a few kHz and up, since switching its ground that fast browns out its electronics.
     #[arg(long, default_value_t = 200)]
     fan_hz: u32,
-    /// Lowest running duty, 0 to 1. Below it a 2-wire fan stalls: the head's fan holds at 20 % at
-    /// 200 Hz, so 25 % leaves a margin for a cold or dusty one.
-    #[arg(long, default_value_t = 0.25)]
+    /// Lowest running duty, 0 to 1. The default of 1 runs the fan on or off, never in between:
+    /// the head's small 2-wire fan hummed or whined at every part speed tried (100 Hz to 1 kHz,
+    /// 25 to 75 %) and stalled at 2 kHz and above (17/11/2026). Below 1, anything above zero is
+    /// raised to it, so set it above the duty the fan stalls at.
+    #[arg(long, default_value_t = 1.0)]
     fan_min: f32,
     /// SoC temperature (°C) the fan starts at, at its minimum speed.
     #[arg(long, default_value_t = 60.0)]
