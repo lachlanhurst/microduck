@@ -1485,6 +1485,7 @@ dependencies = [
  "duck-ipc-proto",
  "libloading 0.8.9",
  "ort",
+ "robotd-params",
  "rustypot",
  "serde",
  "serde_json",

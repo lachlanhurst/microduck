@@ -47,3 +47,5 @@ serialport = { version = "4.8", default-features = false }
 
 [dev-dependencies]
 serde_json.workspace = true
+# `examples/lean_test` reads robotd's config (both layers) for the bridge's zeros and IMU mount.
+robotd-params = { path = "../robotd-params" }
