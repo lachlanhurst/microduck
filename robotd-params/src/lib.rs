@@ -2017,6 +2017,14 @@ pub struct PolicyParams {
     pub standing_action_scale: f64,
     /// Standing runs softer, at this fraction of `gain`.
     pub standing_gain_ratio: f64,
+    /// Keep the `stand` network for getting up only. Off (the default), it runs whenever the
+    /// speed command is near zero, so it also does the standing still. On, it has the robot
+    /// only from the moment the policy takes a robot that is not upright — a limp-fall
+    /// hand-back, or Start with the robot on the floor — until the robot has been upright
+    /// (inside `safety.limp_fall_tilt_z`) for `safety.limp_fall_arm_ms`; standing still is
+    /// then the `walk` network's, at the walking gain and action scale. On Dukki the stand-up
+    /// network shook on carpet where the walk network stood still (26/11/2026).
+    pub stand_only_to_get_up: bool,
     /// Position P gain while running.
     pub gain: u16,
     /// First-order low-pass on the head joint targets, `1.0` = pass-through. Default 0.5
@@ -2621,6 +2629,7 @@ pub struct ResolvedPolicy {
     pub action_scale: f64,
     pub standing_action_scale: f64,
     pub standing_gain_ratio: f64,
+    pub stand_only_to_get_up: bool,
     pub gain: u16,
     pub head_lowpass: Option<f64>,
     pub legs_lowpass: Option<f64>,
@@ -2851,6 +2860,7 @@ impl PolicyParams {
             }),
             standing_action_scale: self.standing_action_scale,
             standing_gain_ratio: self.standing_gain_ratio,
+            stand_only_to_get_up: self.stand_only_to_get_up,
             gain: self.gain,
             head_lowpass: Some(self.head_lowpass.unwrap_or(0.5)).filter(|a| *a < 1.0),
             legs_lowpass: Some(self.legs_lowpass.unwrap_or(0.7)).filter(|a| *a < 1.0),
@@ -2986,6 +2996,7 @@ impl Default for PolicyParams {
             standing_action_scale: 1.0,
             // The prototype's `--standing-kp-ratio`.
             standing_gain_ratio: 0.8,
+            stand_only_to_get_up: false,
             gain: 200,
             head_lowpass: None,
             legs_lowpass: None,
@@ -4395,6 +4406,17 @@ mod tests {
         let bare = tuned.resolved_with(None);
         assert_eq!(bare.sitstand_rise_s, 2.5);
         assert_eq!(bare.sitstand_ramp_s, super::DEFAULT_SITSTAND_RAMP_S);
+    }
+
+    /// Off unless asked for, and carried through resolution when it is.
+    #[test]
+    fn the_stand_network_stands_still_unless_kept_for_getting_up() {
+        let default = super::PolicyParams::default().resolved_with(None);
+        assert!(!default.stand_only_to_get_up);
+        let (params, unknown) =
+            super::Params::parse("[policy]\nstand_only_to_get_up = true\n").expect("parses");
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert!(params.policy.resolved_with(None).stand_only_to_get_up);
     }
 
     /// Zero or negative seconds would hand back at once or never: refused at load.

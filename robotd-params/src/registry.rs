@@ -302,6 +302,11 @@ pub const REGISTRY: &[Entry] = &[
         "Standing runs at this fraction of gain",
     ),
     entry(
+        "policy.stand_only_to_get_up",
+        Kind::Bool,
+        "Stand network only gets a fallen robot up; the walk network stands still",
+    ),
+    entry(
         "policy.gain",
         Kind::Integer,
         "Servo position P gain while running",

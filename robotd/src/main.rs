@@ -333,6 +333,14 @@ impl Parked {
     }
 }
 
+/// `[policy] stand_only_to_get_up`: a robot the policy took while it was not upright, which the
+/// standing network has until it is up. "Up" is the parked robot's hand-back test
+/// ([`Parked`]): upright inside `limp_fall_tilt_z` *and* still (gyro under
+/// `limp_fall_still_rate`) for `limp_fall_standup_resume_ms` — still as well as upright, so the
+/// walk network is not handed a robot rocking through vertical on its way up. The clock only
+/// runs while the policy drives.
+type Rising = Parked;
+
 impl LimpFall {
     /// The interpolated pose target for this tick, or `None` once the ramp is done.
     ///
@@ -2742,6 +2750,9 @@ async fn control_loop<T: RobotIo>(
     let standup_upright = Duration::from_millis(params.safety.limp_fall_arm_ms);
     // Retries spent: parked at home, policy off, until somebody stands it on its feet.
     let mut standup_parked: Option<Parked> = None;
+    // `[policy] stand_only_to_get_up`: see [`Rising`]. `Some` while the standing network is
+    // getting the robot up.
+    let mut rising: Option<Rising> = None;
     let standup_resume = Duration::from_millis(params.safety.limp_fall_standup_resume_ms);
 
     // The voice, and the ear. Both optional equipment: a robot without a codec or a bank
@@ -4383,6 +4394,43 @@ async fn control_loop<T: RobotIo>(
                 && standup.is_none()
             {
                 standup = Some(StandUp::new(tick_start));
+            }
+            // A robot taken while not upright (a limp-fall hand-back, Start with it on the
+            // floor) is the standing network's to get up. One already upright — Start on its
+            // feet, a resume after a bus hiccup — goes straight to the walk network. Blind
+            // counts as not upright: the stand-up is the safe guess for a robot nobody can read.
+            if policy_cfg.stand_only_to_get_up
+                && !fresh
+                    .as_ref()
+                    .is_some_and(|s| s.imu.gravity[2] <= params.safety.limp_fall_tilt_z)
+            {
+                if rising.is_none() {
+                    tracing::info!("not upright — the standing network gets it up");
+                }
+                rising = Some(Rising::default());
+            }
+        }
+        if policy_cfg.stand_only_to_get_up && policy_cfg.mode == Mode::Walk {
+            if driving
+                && let Some(watch) = rising.as_mut()
+                && watch.observe(
+                    fresh.as_ref().map(|s| {
+                        (
+                            s.imu.gravity[2],
+                            s.imu.gyro.iter().map(|w| w * w).sum::<f64>().sqrt(),
+                        )
+                    }),
+                    period,
+                    params.safety.limp_fall_tilt_z,
+                    params.safety.limp_fall_still_rate,
+                    standup_resume,
+                )
+            {
+                tracing::info!("up — standing still goes to the walk network");
+                rising = None;
+            }
+            if let Some(controller) = controller.as_mut() {
+                controller.set_standing_disabled(rising.is_none());
             }
         }
         if was_driving && !driving {

@@ -367,6 +367,12 @@ impl Controller {
         self.policy.has_sitstand()
     }
 
+    /// Keep the standing network from being selected by command magnitude (`[policy]
+    /// stand_only_to_get_up` turns it on and off around a get-up). A no-op without one.
+    pub fn set_standing_disabled(&mut self, disabled: bool) {
+        self.policy.set_standing_disabled(disabled);
+    }
+
     /// How long the policy holds the shutdown sit before the joints ease into the rest pose:
     /// the seat's settle time, then a second sitting still.
     pub fn shutdown_sit_secs(&self) -> f64 {

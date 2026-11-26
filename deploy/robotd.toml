@@ -273,6 +273,11 @@ mode = "walk"
 # standing_action_scale = 1.0
 # Standing runs softer, at this fraction of `gain`. The prototype's --standing-kp-ratio.
 # standing_gain_ratio = 0.8
+# Keep the stand network for getting up only: it has the robot from a limp-fall hand-back (or
+# Start with the robot on the floor) until it is upright and still for
+# safety.limp_fall_standup_resume_ms, and standing still is then the walk network's. Off, the
+# stand network runs whenever the speed command is near zero.
+# stand_only_to_get_up = false
 # Position P gain while running.
 # gain = 200
 
